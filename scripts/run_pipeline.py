@@ -9,7 +9,7 @@ Stages (each is independently resumable - see Checkpointing below):
   4. hic_convert     hictools convert               -> merged HiC BIN
   5. contig_ec       hapcure                        -> contig error-correction AGP
   6. hapscotch       hapscotch                      -> haplotype phased scaffolds
-  7. yahs_scaffold   seqtools/yahs/hictools/hicmap  -> HiC-rescaffolded haplotypes
+  7. yahs_scaffold   seqtools/yahs/hictools/hicmap  -> HiC-scaffolded haplotypes
   8. collect_results copy final files               -> <outdir>/4.results
 
 Checkpointing: every step declares the output file(s) it must produce. On start-up
@@ -85,10 +85,6 @@ class Ctx:
     yahs_bin: str = "yahs"
 
     @property
-    def tmpdir(self) -> Path:
-        return self.outdir / "tmpdir"
-
-    @property
     def datadir(self) -> Path:
         return self.outdir / "data"
 
@@ -117,7 +113,7 @@ class Ctx:
         return self.outdir / "4.results"
 
     def ensure_dirs(self) -> None:
-        for d in (self.outdir, self.tmpdir, self.datadir, self.logdir):
+        for d in (self.outdir, self.datadir, self.logdir):
             d.mkdir(parents=True, exist_ok=True)
 
 
@@ -187,7 +183,7 @@ def preflight_check(ctx: Ctx, steps: list) -> None:
     """Verify every external tool/script needed by the steps that are actually
     applicable to this run (Step.applicable()) can be found, before anything
     runs - e.g. yahs/hictools-prepare/hicmap.py are only required when the
-    yahs_rescaffold step is actually going to run."""
+    yahs_scaffold step is actually going to run."""
     checks_by_step = {
         "seq_index":       [("seqtools", ctx.seqtools)],
         "self_align":      [("selfaln.py", SELFALN_PY)],
@@ -195,7 +191,7 @@ def preflight_check(ctx: Ctx, steps: list) -> None:
         "hic_convert":     [("hictools", ctx.hictools)],
         "contig_ec":       [("hapcure", ctx.hapcure_bin)],
         "hapscotch":       [("hapscotch", ctx.hapscotch_bin)],
-        "yahs_rescaffold": [("seqtools", ctx.seqtools), ("yahs", ctx.yahs_bin),
+        "yahs_scaffold":   [("seqtools", ctx.seqtools), ("yahs", ctx.yahs_bin),
                             ("hictools", ctx.hictools), ("hicmap.py", HICMAP_PY)],
         "collect_results": [("seqtools", ctx.seqtools)],
     }
@@ -274,7 +270,8 @@ def step_self_align(ctx: Ctx, args) -> Step:
     def _run():
         run_cmd(
             [sys.executable, str(SELFALN_PY), str(ctx.seqfile), "-o", str(out),
-             "-t", str(ctx.threads), "--tmpdir", str(ctx.tmpdir)],
+             "-t", str(ctx.threads), "--tmpdir", str(ctx.datadir),
+             "--fastga-bin", args.fastga_bin],
             ctx.logdir / "self_align.log",
         )
 
@@ -293,7 +290,7 @@ def step_hic_align(ctx: Ctx, args) -> tuple:
         for src, out in zip(hicfiles, generated):
             run_cmd(
                 [sys.executable, str(HICALN_PY), str(ctx.seqfile), str(src), "-o", str(out),
-                 "-t", str(ctx.threads), "--tmpdir", str(ctx.tmpdir)],
+                 "-t", str(ctx.threads), "--tmpdir", str(ctx.datadir)],
                 ctx.logdir / f"hic_align.{out.stem}.log",
             )
 
@@ -405,7 +402,7 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
     return Step("hapscotch", lambda: [out], _run)
 
 
-def step_yahs_rescaffold(ctx: Ctx, args, run_yahs_fn) -> Step:
+def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
     hap_prefix = ctx.hapscotch_dir / "haps"
     final_agp = ctx.yahs_dir / "allhaps.scf.agp"
 
@@ -418,7 +415,8 @@ def step_yahs_rescaffold(ctx: Ctx, args, run_yahs_fn) -> Step:
         bbscf_agp = Path(f"{hap_prefix}.bbscf.agp")
         bbpos_txt = Path(f"{hap_prefix}.bbpos.txt")
         bbscf_hic_bin = Path(f"{hap_prefix}.bbscf-hic.bin")
-        for needed in (bbseq_agp, bbscf_agp, bbpos_txt, bbscf_hic_bin):
+        seq_hic_bin = resolved_hicbin_fn()
+        for needed in (bbseq_agp, bbscf_agp, bbpos_txt, bbscf_hic_bin, seq_hic_bin):
             if not needed.exists():
                 raise PipelineError(
                     f"YaHS branch requested but required hapscotch output missing: {needed}\n"
@@ -454,7 +452,7 @@ def step_yahs_rescaffold(ctx: Ctx, args, run_yahs_fn) -> Step:
         run_cmd(
             [ctx.hictools, "prepare", "-a", str(final_agp), "-n", "2000",
              "-o", str(hic_txt)] + args.hictools_prepare_opt
-            + [str(bbscf_hic_bin), str(ctx.idxfile)],
+            + [str(seq_hic_bin), str(ctx.idxfile)],
             ctx.logdir / "yahs.hictools_prepare.log",
         )
 
@@ -466,7 +464,7 @@ def step_yahs_rescaffold(ctx: Ctx, args, run_yahs_fn) -> Step:
             ctx.logdir / "yahs.hicmap.log",
         )
 
-    return Step("yahs_rescaffold", lambda: [final_agp], _run, applicable=_applicable)
+    return Step("yahs_scaffold", lambda: [final_agp], _run, applicable=_applicable)
 
 
 def _find_yahs_scaffolds_agp(prefix: Path) -> Path:
@@ -597,20 +595,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bins.add_argument("--hapscotch-bin", default="hapscotch")
     bins.add_argument("--hapcure-bin", default="hapcure")
     bins.add_argument("--yahs-bin", default="yahs")
+    bins.add_argument("--fastga-bin", default="FastGA")
 
     return p
 
 
 STEP_NAMES = [
     "seq_index", "self_align", "hic_align", "hic_convert",
-    "contig_ec", "hapscotch", "yahs_rescaffold", "collect_results",
+    "contig_ec", "hapscotch", "yahs_scaffold", "collect_results",
 ]
 
 # argparse fields that don't affect what the pipeline does/produces, so they're
 # excluded from the OUTDIR/data/CMD record used to validate a --force*/--resume run
 _NON_CRITICAL_PARAM_KEYS = {
     "resume", "force", "force_from", "verbose", "outdir",
-    "seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin", "yahs_bin",
+    "seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin", "yahs_bin", "fastga_bin",
 }
 
 
@@ -698,7 +697,7 @@ def main(argv=None) -> int:
 
     step_hs = step_hapscotch(ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec_fn,
                               run_yahs_fn)
-    step_yh = step_yahs_rescaffold(ctx, args, run_yahs_fn)
+    step_yh = step_yahs_scaffold(ctx, args, resolved_hicbin_fn, run_yahs_fn)
     step_res = step_collect_results(ctx, run_yahs_fn)
 
     steps = [step_idx, step_sa, step_ha, step_hc, step_ec, step_hs, step_yh, step_res]

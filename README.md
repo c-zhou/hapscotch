@@ -16,6 +16,7 @@ You need a C compiler, GNU make, cmake and zlib/pthread development files.
     git clone --recurse-submodules https://github.com/c-zhou/hapscotch.git
     cd hapscotch
     make
+    make install  ## optionally install all executables in ~/bin/
 
 If you already cloned without `--recurse-submodules`, run
 `git submodule update --init --recursive` first - this fetches the bundled
@@ -39,7 +40,7 @@ Prerequisites to run it:
   if you do not already have Hi-C alignment
 
 Basic usage (haploid/no Hi-C):
-
+    
     python3 scripts/run_pipeline.py -o OUTDIR genome.fa
 
 With Hi-C data (enables contig error-correction and, by default, the YaHS
@@ -47,7 +48,6 @@ rescaffolding branch):
 
     python3 scripts/run_pipeline.py -o OUTDIR --hic-aln hic.bam genome.fa
     python3 scripts/run_pipeline.py -o OUTDIR --hic-file r1.fq.gz,r2.fq.gz --hic-file hic.paired.fq.gz genome.fa
-
 
 Run `python3 scripts/run_pipeline.py -h` for the full option list.
 
@@ -66,11 +66,29 @@ Pipeline stages:
 
 Final outputs (`OUTDIR/4.results`):
 
-    haps.scfs.agp              phased haplotype scaffolds (AGP)
-    haps.group.txt             per-contig haplotype/linkage-group assignment
-    allhaps.scf.agp            Hi-C-rescaffolded scaffolds (AGP)              | only if the YaHS branch ran
-    allhaps.scf.hic.png/.pdf   Hi-C contact map for the rescaffolded assembly | only if the YaHS branch ran
-    allhaps.scf.fa             Hi-C-rescaffolded scaffold sequences           | only if the YaHS branch ran
+    haps.grp.txt               per-contig haplotype assignment
+    haps.grp.agp               scaffold groups constructed from synteny
+    haps.cnt.txt               estimated haplotype number/ploidy
+    haps.all.agp               scaffolds combining Hi-C [all haplotypes]      | only if the YaHS ran
+    haps.[1-9][0-9]*.agp       scaffolds combining Hi-C [each haplotype]      | only if the YaHS ran
+    haps.[1-9][0-9]*.fa        scaffolds combining Hi-C [each haplotype]      | only if the YaHS ran
+    haps.all.hic.png/.pdf      Hi-C contact map for the scaffolded assembly   | only if the YaHS ran
+    
+
+Those files in the result folder can be used combining with `seqtools seq` to generate various types of FASTA output.
+
+* *Generate a FASTA file with scaffolds from all haplotypes, i.e., concatenation of `haps.[1-9][0-9]*.fa`*
+
+    ```
+    seqtools seq -a genome.fa haps.all.agp >haps.all.fa   ##need -a option for AGP input
+    ```
+
+* *Generate a FASTA file with all sequences assigned to a given haplotype*
+
+    ```
+    seqtools seq genome.fa <(awk '{if($3==1) print $1}') >seqs.h1.fa
+    seqtools seq genome.fa <(awk '{if($3==3) print $1}') >seqs.h3.fa
+    ```
 
 ## Running step by step
 Each stage can also be run directly. Options shown are the minimum needed;
@@ -104,11 +122,11 @@ produces `ctg.ec.agp`, fed back into `hapscotch` with `-a`.
 
 **7. (optional) Hi-C rescaffolding with YaHS**
 
-    seqtools seq -o haps.bbseq.fa haps.bbseq.agp genome.fa
+    seqtools seq -o haps.bbseq.fa -a genome.fa haps.bbseq.agp
     seqtools idx -o haps.bbseq.fa.idx haps.bbseq.fa
     yahs -a haps.bbscf.agp --no-contig-ec --no-scaffold-ec -o haps.bbseq haps.bbseq.fa haps.bbscf-hic.bin
     seqtools hap -o allhaps.scf.agp haps.bbseq_scaffolds_final.agp haps.bbpos.txt
-    seqtools seq -o allhaps.scf.fa allhaps.scf.agp genome.fa
+    seqtools seq -o allhaps.scf.fa -a genome.fa allhaps.scf.agp
     ## optionally for diagnostic hic plots
     hictools prepare -a allhaps.scf.agp -n 2000 -o allhaps.scf.hic.txt haps.bbscf-hic.bin genome.fa.idx
     python3 scripts/hicmap.py --png allhaps.scf.hic.png --pdf allhaps.scf.hic.pdf allhaps.scf.hic.txt

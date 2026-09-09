@@ -60,7 +60,7 @@ static int parse_file_type(const char *str, fileType_t *f_type)
 static void print_help(FILE *fo)
 {
     fprintf(fo, "\n");
-    fprintf(fo, "Usage: hapcure [options] <genome.fa.fai> <hic.bed|hic.bam|hic.pa5|hic.1map|hic.bin>\n");
+    fprintf(fo, "Usage: hapcure [options] <genome.fa.[fai|idx]> <hic.[bed|bam|pa5|1map|bin]>\n");
     fprintf(fo, "Options:\n");
     fprintf(fo, "    -s NUM                 bin size [1k]\n");
     fprintf(fo, "    -d NUM                 maximum cis contact distance [1M]\n");
@@ -77,7 +77,7 @@ static void print_help(FILE *fo)
     fprintf(fo, "    -h, --help             print this help\n");
     fprintf(fo, "    -V, --version          show version number\n");
     fprintf(fo, "\n");
-    fprintf(fo, "Example: ./hapcure -o hapcure.out genome.fa.gz hic.bam\n");
+    fprintf(fo, "Example: ./hapcure -o hapcure.out genome.fa.fai hic.bam\n");
     fprintf(fo, "\n");
 }
 

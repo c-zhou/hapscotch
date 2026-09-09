@@ -64,7 +64,7 @@ static ko_longopt_t convert_long_options[] = {
 static void print_help_convert(FILE *fp)
 {
     fprintf(fp, "\n");
-    fprintf(fp, "Usage: hictools convert [options] <genome.fa.idx> <hic.bed|hic.bam|hic.pa5|hic.bin> [...]\n");
+    fprintf(fp, "Usage: hictools convert [options] <genome.fa.[fai|idx]> <hic.[bed|bam|pa5|1map|bin]> [...]\n");
     fprintf(fp, "Options:\n");
     fprintf(fp, "    -o STR         output file prefix [hictools.out]\n");
     fprintf(fp, "    -t STR         input file type BED|BAM|PA5|ONE|BIN\n");
@@ -73,8 +73,8 @@ static void print_help_convert(FILE *fp)
     fprintf(fp, "    -h, --help     print this help\n");
     fprintf(fp, "    -V, --version  show version number\n");
     fprintf(fp, "\n");
-    fprintf(fp, "Example: hictools convert genome.fa.idx hic.bam\n");
-    fprintf(fp, "         hictools convert genome.fa.idx hic.1.bam hic.2.bam hic.3.bam\n");
+    fprintf(fp, "Example: hictools convert genome.fa.fai hic.bam\n");
+    fprintf(fp, "         hictools convert genome.fa.fai hic.1.bam hic.2.bam hic.3.bam\n");
     fprintf(fp, "\n");
 }
 
@@ -267,7 +267,7 @@ static ko_longopt_t prepare_long_options[] = {
 static void print_help_prepare(FILE *fp)
 {
     fprintf(fp, "\n");
-    fprintf(fp, "Usage: hictools prepare [options] <hic.bin> <genome.fa.idx>\n");
+    fprintf(fp, "Usage: hictools prepare [options] <hic.bin> <genome.fa.[fai|idx]>\n");
     fprintf(fp, "Options:\n");
     fprintf(fp, "    -a FILE        AGP file mapping contigs to scaffolds (optional)\n");
     fprintf(fp, "    -n INT         number of bins (pixels) for the contact map [1000]\n");
@@ -279,8 +279,8 @@ static void print_help_prepare(FILE *fp)
     fprintf(fp, "    -h, --help     print this help\n");
     fprintf(fp, "    -V, --version  show version number\n");
     fprintf(fp, "\n");
-    fprintf(fp, "Example: hictools prepare -n 2000 hic.bin genome.fa.idx\n");
-    fprintf(fp, "         hictools prepare -a scaffolds.agp -n 2000 hic.bin genome.fa.idx\n");
+    fprintf(fp, "Example: hictools prepare -n 2000 hic.bin genome.fa.fai\n");
+    fprintf(fp, "         hictools prepare -a scaffolds.agp -n 2000 hic.bin genome.fa.fai\n");
     fprintf(fp, "\n");
 }
 
@@ -1040,16 +1040,16 @@ uint64 assembly_scale_max_seq(asm_dict_t *dict, int *scale, uint64 max_s, uint64
 static void print_help_hiclink(FILE *fp_help)
 {
     fprintf(fp_help, "\n");
-    fprintf(fp_help, "Usage: hictools hiclink [options] <hic.bed>|<hic.bam>|<hic.pa5>|<hic.bin> <scaffolds.agp> <contigs.fa.idx>\n");
+    fprintf(fp_help, "Usage: hictools hiclink [options] <hic.[bed|bam|pa5|1map|bin]> <scaffolds.agp> <contigs.fa.[fai|idx]>\n");
     fprintf(fp_help, "Options:\n");
     fprintf(fp_help, "    -a             preprocess for assembly mode\n");
     fprintf(fp_help, "    -q INT         minimum mapping quality [10]\n");
     fprintf(fp_help, "    -o STR         output file prefix (required for '-a' mode) [stdout]\n");
-    fprintf(fp_help, "    -f STR         input file type BED|BAM|PA5|BIN, file name extension is ignored\n");
+    fprintf(fp_help, "    -f STR         input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
     fprintf(fp_help, "    -h, --help     print this help\n");
     fprintf(fp_help, "    -V, --version  show version number\n");
     fprintf(fp_help, "\n");
-    fprintf(fp_help, "Example: hictools hiclink -o output hic.bam scaffolds.agp contigs.fa.idx\n");
+    fprintf(fp_help, "Example: hictools hiclink -o output hic.bam scaffolds.agp contigs.fa.fai\n");
     fprintf(fp_help, "\n");
 }
 
@@ -1376,7 +1376,7 @@ static int assembly_to_agp(char *assembly, char *lift, sdict_t *sdict, FILE *fo)
 static void print_help_agplift(FILE *fp_help)
 {
     fprintf(fp_help, "\n");
-    fprintf(fp_help, "Usage: hictools agplift [options] <review.assembly> <liftover.agp> <contigs.fa[.idx]>\n");
+    fprintf(fp_help, "Usage: hictools agplift [options] <review.assembly> <liftover.agp> <contigs.fa[.fai|.idx]>\n");
     fprintf(fp_help, "Options:\n");
     fprintf(fp_help, "    -o STR             output file prefix (required for scaffolds FASTA output) [stdout]\n");
     fprintf(fp_help, "      --seq-ctype STR  AGP output sequence component type [%s]\n", agp_component_type_val(DEFAULT_AGP_SEQ_COMPONENT_TYPE));
@@ -1386,7 +1386,7 @@ static void print_help_agplift(FILE *fp_help)
     fprintf(fp_help, "    -h, --help         print this help\n");
     fprintf(fp_help, "    -V, --version      show version number\n");
     fprintf(fp_help, "\n");
-    fprintf(fp_help, "Example: hictools agplift -o output review.assembly liftover.agp contigs.fa.idx\n");
+    fprintf(fp_help, "Example: hictools agplift -o output review.assembly liftover.agp contigs.fa.fai\n");
     fprintf(fp_help, "\n");
 }
 

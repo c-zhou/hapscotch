@@ -112,7 +112,7 @@ int main(int argc, char *argv[])
 
     if (argc == opt.ind || fp_help == stdout) {
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Usage: hapcount [options] genome.fa[.gz] aln.paf[.gz]\n");
+        fprintf(fp_help, "Usage: hapcount [options] <genome.fa.[fai|idx]> <aln.paf[.gz]>\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -g FILE                BUSCO gene full table (for statistics only)\n");
         fprintf(fp_help, "    -a FILE                AGP file of assembly error corrected sequences\n");
@@ -124,7 +124,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -h, --help             print this help\n");
         fprintf(fp_help, "    -V, --version          show version number\n");
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Example: ./hapcount -o hapcount.out genome.fa.gz aln.paf\n");
+        fprintf(fp_help, "Example: ./hapcount -o hapcount.out genome.fa.fai aln.paf\n");
         fprintf(fp_help, "\n");
         return fp_help == stdout? 0 : 1;
     }

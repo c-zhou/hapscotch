@@ -224,7 +224,7 @@ static void annot_haps_from_agp(char *agp, char *ann, int hap, FILE *fo)
         scf = &scfs[s];
         for (h = hap_lo; h <= hap_hi; h++) {
             ks->l = 0;
-            ksprintf(ks, "%s.h%d", scf->name, h);
+            ksprintf(ks, "%s_h%d", scf->name, h);
             scf_pos = 1;
             part_no = 0;
             add_gap = 0;

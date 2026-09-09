@@ -11855,7 +11855,7 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     MYMALLOC(name, 128);
 
     if (opts_out & AGP_OUT) {
-        sprintf(file, "%s.scfs.agp", pref_out);
+        sprintf(file, "%s.grp.agp", pref_out);
         fo = fopen(file, "w");
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 
@@ -11864,7 +11864,7 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
             nctg = scf->nctg;
             ctgs = scf->ctgs;
             segs = scf->segs;
-            sprintf(name, "LG%d.H%d", grp, hap);
+            sprintf(name, "scaffold_%d_h%d", grp, hap);
 
             slen = 0;
             t = 0;
@@ -11891,7 +11891,7 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     }
 
     if (opts_out & GRP_OUT) {
-        sprintf(file, "%s.group.txt", pref_out);
+        sprintf(file, "%s.grp.txt", pref_out);
         fo = fopen(file, "w");
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 
@@ -11914,7 +11914,7 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     }
 
     if (opts_out & PLT_OUT) {
-        sprintf(file, "%s.plot.txt", pref_out);
+        sprintf(file, "%s.plt.txt", pref_out);
         fo = fopen(file, "w");
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 

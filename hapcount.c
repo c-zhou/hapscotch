@@ -75,7 +75,7 @@ int main(int argc, char *argv[])
     busco_table_t *buscos;
     int64 naln, novl;
     int ploidy_num, dual_aln;
-    char *busco_file, *agp_file, *pref_out, *out_file;
+    char *busco_file, *agp_file;
     
     sys_init();
     srand48(42);
@@ -85,7 +85,6 @@ int main(int argc, char *argv[])
     n_threads = 1;
     busco_file = 0;
     agp_file = 0;
-    pref_out = "hapcount.out";
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 'D') dual_aln = 0;
@@ -93,7 +92,15 @@ int main(int argc, char *argv[])
         else if (c == 'g') busco_file = opt.arg;
         else if (c == 'P') MAX_PLOIDY_NUMBER = atoi(opt.arg);
         else if (c == 't') n_threads = atoi(opt.arg);
-        else if (c == 'o') pref_out = opt.arg;
+        else if (c == 'o') {
+            if (strcmp(opt.arg, "-") != 0) {
+                if (freopen(opt.arg, "wb", stdout) == NULL) {
+                    fprintf(stderr, "[ERROR]\033[1;31m failed to write the output to file '%s'\033[0m: %s\n", opt.arg, 
+strerror(errno));
+                    return 1;
+                }
+            }
+        }
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -119,7 +126,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -D                     input alignments are not dual mappings\n");
         fprintf(fp_help, "      --max-ploidy INT     upper limit of genome ploidy number to consider [%d]\n", MAX_PLOIDY_NUMBER);
         fprintf(fp_help, "    -t INT                 maximum number of threads to use [%d]\n", n_threads);
-        fprintf(fp_help, "    -o STR                 string prefix of output files [%s]\n", pref_out);
+        fprintf(fp_help, "    -o STR                 output file name\n");
         fprintf(fp_help, "    -v INT                 verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    -h, --help             print this help\n");
         fprintf(fp_help, "    -V, --version          show version number\n");
@@ -192,19 +199,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[W::%s] the estimated ploidy number (%d) is odd\n", __func__, ploidy_num);
 
     // write output
-    out_file = (char *) malloc(strlen(pref_out) + 8);
-    sprintf(out_file, "%s.ploidy", pref_out);
-    fo = fopen(out_file, "w");
-    if (fo == NULL) {
-        fprintf(stderr, "[E::%s] cannot open file to write: %s\n", __func__, out_file);
-        return 1;
-    }
-    fprintf(fo, "%d\n", ploidy_num);
-    fclose(fo);
-    free(out_file);
-
-    printf("Estimated_ploidy\t%d\n", ploidy_num);
-
+    fprintf(stdout, "Estimated_ploidy\t%d\n", ploidy_num);
+    
     free(ovls);
     sd_destroy(dicts);
     if (break_dict) {

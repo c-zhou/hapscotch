@@ -107,7 +107,7 @@ class Ctx:
     @property
     def yahs_dir(self) -> Path:
         return self.outdir / "3.yahs"
-
+    
     @property
     def results_dir(self) -> Path:
         return self.outdir / "4.results"
@@ -371,7 +371,10 @@ def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn) -> tupl
 def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec_fn,
                     run_yahs_fn) -> Step:
     prefix = ctx.hapscotch_dir / "haps"
-    out = Path(f"{prefix}.scfs.agp")
+    outs = [Path(f"{prefix}.grp.agp"),
+            Path(f"{prefix}.grp.txt"),
+            Path(f"{prefix}.cnt.txt"),
+            ]
 
     def _run():
         ctx.hapscotch_dir.mkdir(parents=True, exist_ok=True)
@@ -400,13 +403,18 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
             [ctx.hapscotch_bin] + opts + ["-o", str(prefix), str(ctx.idxfile), str(seqaln_fn())],
             ctx.logdir / "hapscotch.log",
         )
+        ploidy = 0
+        with open(Path(f"{prefix}.grp.txt")) as f:
+            ploidy = max((int(line.split()[2]) for line in f), default=0)
+        with open(Path(f"{prefix}.cnt.txt"), "w") as f:
+            f.write(f"{ploidy}\n")
 
-    return Step("hapscotch", lambda: [out], _run)
+    return Step("hapscotch", lambda: outs, _run)
 
 
 def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
     hap_prefix = ctx.hapscotch_dir / "haps"
-    final_agp = ctx.yahs_dir / "allhaps.scf.agp"
+    final_agp = ctx.yahs_dir / "haps.all.agp"
 
     def _applicable() -> bool:
         return run_yahs_fn()
@@ -427,8 +435,9 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
 
         bbseq_fa = ctx.yahs_dir / "haps.bbseq.fa"
         run_cmd(
-            [ctx.seqtools, "seq", "-o", str(bbseq_fa), str(bbseq_agp), str(ctx.seqfile)],
-            ctx.logdir / "yahs.seqtools_seq.log",
+            [ctx.seqtools, "seq", "-a", "-o", str(bbseq_fa), 
+             str(ctx.seqfile), str(bbseq_agp)],
+             ctx.logdir / "yahs.seqtools_seq.log",
         )
 
         bbseq_idx = ctx.yahs_dir / "haps.bbseq.fa.fai" # yahs need .fai not .idx
@@ -445,12 +454,23 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
         )
         yahs_scaffolds = _find_yahs_scaffolds_agp(yahs_prefix)
 
+        # AGP for all haplotypes
         run_cmd(
             [ctx.seqtools, "hap", "-o", str(final_agp), str(yahs_scaffolds), str(bbpos_txt)],
-            ctx.logdir / "yahs.seqtools_hap.log",
+            ctx.logdir / "yahs.seqtools_haps.log",
         )
 
-        hic_txt = ctx.yahs_dir / "allhaps.scf.hic.txt"
+        # AGP for each individual haplotype
+        with open(Path(f"{hap_prefix}.cnt.txt")) as f:
+            ploidy = max((int(line.split()[0]) for line in f), default=0)
+        for hap in range(1, ploidy + 1):
+            hap_agp = ctx.yahs_dir / f"haps.{hap}.agp"
+            run_cmd(
+                [ctx.seqtools, "hap", "-p", str(hap), "-o", str(hap_agp), str(yahs_scaffolds), str(bbpos_txt)],
+                ctx.logdir / f"yahs.seqtools_hap{hap}.log",
+            )
+
+        hic_txt = ctx.yahs_dir / "haps.all.hic.txt"
         run_cmd(
             [ctx.hictools, "prepare", "-a", str(final_agp), "-n", "2000",
              "-o", str(hic_txt)] + args.hictools_prepare_opt
@@ -458,8 +478,8 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
             ctx.logdir / "yahs.hictools_prepare.log",
         )
 
-        hic_png = ctx.yahs_dir / "allhaps.scf.hic.png"
-        hic_pdf = ctx.yahs_dir / "allhaps.scf.hic.pdf"
+        hic_png = ctx.yahs_dir / "haps.all.hic.png"
+        hic_pdf = ctx.yahs_dir / "haps.all.hic.pdf"
         run_cmd(
             [sys.executable, str(HICMAP_PY), "--png", str(hic_png), "--pdf", str(hic_pdf)]
             + args.hicmap_opt + [str(hic_txt)],
@@ -490,32 +510,39 @@ def _find_yahs_scaffolds_agp(prefix: Path) -> Path:
 
 def step_collect_results(ctx: Ctx, run_yahs_fn) -> Step:
     def _outputs():
-        outs = [ctx.results_dir / "haps.scfs.agp", ctx.results_dir / "haps.group.txt"]
+        outs = [ctx.results_dir / "haps.grp.agp", ctx.results_dir / "haps.grp.txt"]
         if run_yahs_fn():
             outs += [
-                ctx.results_dir / "allhaps.scf.agp",
-                ctx.results_dir / "allhaps.scf.hic.png",
-                ctx.results_dir / "allhaps.scf.hic.pdf",
-                ctx.results_dir / "allhaps.scf.fa",
+                ctx.results_dir / "haps.all.agp",
+                ctx.results_dir / "haps.all.hic.png",
+                ctx.results_dir / "haps.all.hic.pdf",
             ]
         return outs
 
     def _run():
         ctx.results_dir.mkdir(parents=True, exist_ok=True)
         hap_prefix = ctx.hapscotch_dir / "haps"
-        shutil.copy(f"{hap_prefix}.scfs.agp", ctx.results_dir / "haps.scfs.agp")
-        shutil.copy(f"{hap_prefix}.group.txt", ctx.results_dir / "haps.group.txt")
+        shutil.copy(f"{hap_prefix}.grp.agp", ctx.results_dir / "haps.grp.agp")
+        shutil.copy(f"{hap_prefix}.grp.txt", ctx.results_dir / "haps.grp.txt")
+        shutil.copy(f"{hap_prefix}.cnt.txt", ctx.results_dir / "haps.cnt.txt")
         if run_yahs_fn():
-            final_agp = ctx.yahs_dir / "allhaps.scf.agp"
-            shutil.copy(final_agp, ctx.results_dir / "allhaps.scf.agp")
-            shutil.copy(ctx.yahs_dir / "allhaps.scf.hic.png", ctx.results_dir / "allhaps.scf.hic.png")
-            shutil.copy(ctx.yahs_dir / "allhaps.scf.hic.pdf", ctx.results_dir / "allhaps.scf.hic.pdf")
-            final_fa = ctx.results_dir / "allhaps.scf.fa"
-            run_cmd(
-                [ctx.seqtools, "seq", "-o", str(final_fa),
-                 str(ctx.results_dir / "allhaps.scf.agp"), str(ctx.seqfile)],
-                ctx.logdir / "results.seqtools_seq.log",
-            )
+            final_agp = ctx.yahs_dir / "haps.all.agp"
+            shutil.copy(final_agp, ctx.results_dir / "haps.all.agp")
+            shutil.copy(ctx.yahs_dir / "haps.all.hic.png", ctx.results_dir / "haps.all.hic.png")
+            shutil.copy(ctx.yahs_dir / "haps.all.hic.pdf", ctx.results_dir / "haps.all.hic.pdf")
+
+            # AGP for each individual haplotype
+            with open(ctx.results_dir / "haps.cnt.txt") as f:
+                ploidy = max((int(line.split()[0]) for line in f), default=0)
+            for hap in range(1, ploidy + 1):
+                hap_agp = ctx.results_dir / f"haps.{hap}.agp"
+                hap_fa  = ctx.results_dir / f"haps.{hap}.fa"
+                shutil.copy(ctx.yahs_dir / f"haps.{hap}.agp", hap_agp)
+                run_cmd(
+                    [ctx.seqtools, "seq", '-a', "-o", str(hap_fa),
+                     str(ctx.seqfile), str(hap_agp)],
+                     ctx.logdir / f"results.seqtools_seq_h{hap}.log",
+                )
 
     return Step("collect_results", _outputs, _run)
 
@@ -591,8 +618,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     bins = p.add_argument_group(
         "tool locations",
-        "bare names resolve via PATH, which automatically includes the repo root "
-        "(parent of scripts/) so the compiled binaries are found without setting these",
+        "bare names resolve via PATH (parent of scripts/ automatically included)",
     )
     bins.add_argument("--seqtools-bin", default="seqtools")
     bins.add_argument("--hictools-bin", default="hictools")

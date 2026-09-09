@@ -30,10 +30,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <zlib.h>
 
 #include "ketopt.h"
 #include "kvec.h"
 #include "kstring.h"
+#include "khash.h"
+#include "kseq.h"
 
 #include "agp-spec.h"
 #include "sdict.h"
@@ -419,18 +422,167 @@ int main_hap(int argc, char *argv[])
     return 0;
 }
 
+typedef struct {
+	int n, m;
+	uint64 *a; // of size m * 2, (beg, end) pair
+} reglist_t;
+
+KHASH_MAP_INIT_STR(reg, reglist_t)
+KHASH_SET_INIT_INT64(64)
+
+typedef kh_reg_t reghash_t;
+
+KSEQ_INIT(gzFile, gzread)
+
+reghash_t *reg_read(const char *fn)
+{
+	reghash_t *h = kh_init(reg);
+	gzFile fp;
+	kstream_t *ks;
+	int dret;
+	kstring_t *str;
+	// read the list
+	fp = strcmp(fn, "-")? gzopen(fn, "r") : gzdopen(fileno(stdin), "r");
+	if (fp == 0) return 0;
+	ks = ks_init(fp);
+	MYCALLOC(str, 1);
+	while (ks_getuntil(ks, 0, str, &dret) >= 0) {
+		int64 beg = -1, end = -1;
+		reglist_t *p;
+		khint_t k = kh_get(reg, h, str->s);
+		if (k == kh_end(h)) {
+			int ret;
+			char *s = strdup(str->s);
+			k = kh_put(reg, h, s, &ret);
+			memset(&kh_val(h, k), 0, sizeof(reglist_t));
+		}
+		p = &kh_val(h, k);
+		if (dret != '\n') {
+			if (ks_getuntil(ks, 0, str, &dret) > 0 && isdigit(str->s[0])) {
+				beg = atoll(str->s);
+				if (dret != '\n') {
+					if (ks_getuntil(ks, 0, str, &dret) > 0 && isdigit(str->s[0])) {
+						end = atoll(str->s);
+						if (end < 0) end = -1;
+					}
+				}
+			}
+		}
+		// skip the rest of the line
+		if (dret != '\n') while ((dret = ks_getc(ks)) > 0 && dret != '\n');
+		if (end < 0 && beg > 0) end = beg, beg = beg - 1; // if there is only one column
+		if (beg < 0) beg = 0, end = INT64_MAX;
+		if (p->n == p->m) {
+			p->m = p->m? p->m<<1 : 4;
+            MYREALLOC(p->a, p->m * 2);
+		}
+		p->a[p->n<<1] = (uint64) beg;
+		p->a[p->n<<1|1] = (uint64) end;
+		p->n++;
+	}
+	ks_destroy(ks);
+	gzclose(fp);
+	free(str->s);
+    free(str);
+	return h;
+}
+
+void reg_destroy(reghash_t *h)
+{
+	khint_t k;
+	if (h == 0) return;
+	for (k = 0; k < kh_end(h); ++k) {
+		if (kh_exist(h, k)) {
+			free(kh_val(h, k).a);
+			free((char*)kh_key(h, k));
+		}
+	}
+	kh_destroy(reg, h);
+}
+
+void write_fasta_file_from_reg(const char *fa, const char *in, FILE *fo, int line_wd)
+{
+	khash_t(reg) *h;
+    gzFile fp;
+	kseq_t *seq;
+	int64 l, i, j, nseq = 0, bseq = 0;
+	khint_t k;
+
+	h = reg_read(in);
+	if (h == 0) {
+		fprintf(stderr, "[E::%s] failed to read the list of regions in file '%s'\n", __func__, in);
+		return;
+	}
+	// subseq
+	fp = strcmp(fa, "-")? gzopen(fa, "r") : gzdopen(fileno(stdin), "r");
+	if (fp == 0) {
+		fprintf(stderr, "[E::%s] failed to open the input file/stream\n", __func__);
+		return;
+	}
+	seq = kseq_init(fp);
+	while ((l = kseq_read(seq)) >= 0) {
+		reglist_t *p;
+		k = kh_get(reg, h, seq->name.s);
+		if (k == kh_end(h)) continue;
+		p = &kh_val(h, k);
+		for (i = 0; i < p->n; ++i) {
+			int64 beg = p->a[i<<1], end = p->a[i<<1|1];
+			if (beg >= seq->seq.l) {
+				fprintf(stderr, "[W::%s] %s: %lld >= %ld\n", __func__, seq->name.s, beg, seq->seq.l);
+				continue;
+			}
+			if (end > seq->seq.l) end = seq->seq.l;
+			fprintf(fo, "%c%s", seq->qual.l == seq->seq.l? '@' : '>', seq->name.s);
+            if (beg > 0 || (int64)p->a[i<<1|1] != INT64_MAX) {
+                if (end == INT64_MAX) {
+                    if (beg) fprintf(fo, ":%lld", beg+1);
+                } else fprintf(fo, ":%lld-%lld", beg+1, end);
+            } 
+            if (seq->comment.l) fprintf(fo, " %s", seq->comment.s);
+			if (end > seq->seq.l) end = seq->seq.l;
+            for (j = 0; j < end - beg; ++j) {
+                if (j == 0 || (line_wd > 0 && j % line_wd == 0))
+                    fputc('\n', fo);
+                fputc(seq->seq.s[j + beg], fo);
+            }
+            fputc('\n', fo);
+            nseq += 1;
+            bseq += end - beg;
+            if (seq->qual.l != seq->seq.l)
+                continue;
+            fputc('+', fo);
+            for (j = 0; j < end - beg; ++j) {
+                if (j == 0 || (line_wd > 0 && j % line_wd == 0))
+                    fputc('\n', fo);
+                fputc(seq->qual.s[j + beg], fo);
+            }
+            fputc('\n', fo);
+		}
+	}
+    
+    fprintf(stderr, "[M::%s] Number sequences: %lld\n", __func__, nseq);
+    fprintf(stderr, "[M::%s] Number bases: %lld\n", __func__, bseq);
+
+	kseq_destroy(seq);
+	gzclose(fp);
+	reg_destroy(h);
+	return;
+}
+
 static void print_help_seq(FILE *fp_help)
 {
     fprintf(fp_help, "\n");
-    fprintf(fp_help, "Usage: seqtools seq [options] <input.agp> <input.fa>\n");
+    fprintf(fp_help, "Usage: seqtools seq [options] <input.fa> <input[.agp]>\n");
     fprintf(fp_help, "Options:\n");
     fprintf(fp_help, "    -l INT            line width [60]\n");
-    fprintf(fp_help, "    -u                allow sequence components with unknown orientations\n");
+    fprintf(fp_help, "    -a                input is in AGP format\n");
+    fprintf(fp_help, "    -u                allow U-type AGP sequence components\n");
     fprintf(fp_help, "    -o STR            output to file [stdout]\n");
     fprintf(fp_help, "    -h, --help        print this help\n");
     fprintf(fp_help, "    -V, --version     show version number\n");
     fprintf(fp_help, "\n");
-    fprintf(fp_help, "Example: seqtools seq -o output.fa scaffolds.agp input.fa\n");
+    fprintf(fp_help, "Example: seqtools seq -o output.fa -a input.fa.gz scaffolds.agp\n");
+    fprintf(fp_help, "         seqtools seq -o output.fa input.fa.gz seqs.list\n");
     fprintf(fp_help, "\n");
 }
 
@@ -451,19 +603,22 @@ int main_seq(int argc, char *argv[])
     at_realtime0 = realtime();
 
     FILE *fo;
-    char *fa, *agp, *out;
-    int line_wd, allow_unknown_oris;
+    char *fa, *in, *out;
+    int line_wd, agp_input, allow_unknown_oris;
 
-    const char *opt_str = "o:ul:Vh";
+    const char *opt_str = "ao:ul:Vh";
     ketopt_t opt = KETOPT_INIT;
     int c;
     FILE *fp_help = stderr;
-    fa = agp = out = 0;
+    fa = in = out = 0;
     line_wd = 60;
+    agp_input = 0;
     allow_unknown_oris = 0;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, seq_long_options)) >= 0) {
-        if (c == 'l') {
+        if (c == 'a') {
+            agp_input = 1;
+        } else if (c == 'l') {
             line_wd = atoi(opt.arg);
         } else if (c == 'u') {
             allow_unknown_oris = 1;
@@ -494,16 +649,18 @@ int main_seq(int argc, char *argv[])
         return 1;
     }
 
-    agp = argv[opt.ind];
-    fa = argv[opt.ind + 1];
+    fa = argv[opt.ind];
+    in = argv[opt.ind + 1];
 
     fo = out == 0? stdout : fopen(out, "w");
     if (fo == 0) {
         fprintf(stderr, "[E::%s] cannot open file %s for writing\n", __func__, out);
         exit(EXIT_FAILURE);
     }
-    
-    write_fasta_file_from_agp(fa, agp, fo, line_wd, allow_unknown_oris);
+    if (agp_input)
+        write_fasta_file_from_agp(fa, in, fo, line_wd, allow_unknown_oris);
+    else
+        write_fasta_file_from_reg(fa, in, fo, line_wd);
 
     if (out != 0)
         fclose(fo);
@@ -698,7 +855,7 @@ static int usage(FILE *fp)
     fprintf(fp, "Version: %s\n", SEQTOOLS_VERSION);
     fprintf(fp, "Usage:   seqtools <command> [options]\n");
     fprintf(fp, "Commands:\n");
-    fprintf(fp, "    seq   generate fasta sequence from AGP file\n");
+    fprintf(fp, "    seq   generate fasta sequence from AGP/REG file\n");
     fprintf(fp, "    hap   generate AGP file for haplotypes\n");
     fprintf(fp, "    idx   generate sequence index from FASTA file\n");
     fprintf(fp, "\n");

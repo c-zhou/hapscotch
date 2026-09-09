@@ -349,7 +349,7 @@ def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn) -> tupl
     out = ctx.hapcure_dir / "ctg.ec.agp"
 
     def _applicable() -> bool:
-        return args.contig_ec and will_have_hic_fn()
+        return args.agp is None and args.contig_ec and will_have_hic_fn()
 
     def _run():
         ctx.hapcure_dir.mkdir(parents=True, exist_ok=True)
@@ -361,6 +361,8 @@ def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn) -> tupl
         )
 
     def _resolved_agpec() -> Optional[Path]:
+        if args.agp is not None:
+            return Path(args.agp)
         return out if _applicable() else None
 
     return Step("contig_ec", lambda: [out], _run, applicable=_applicable), _resolved_agpec
@@ -551,6 +553,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                      help="extra raw option passed through to hapscotch; repeatable ('hapscotch -h' for all options)")
     
     hc = p.add_argument_group("hapcure options")
+    hc.add_argument("-a", "--agp", metavar="AGP",
+                    help="existing error-correction AGP; pass it to hapscotch and skip hapcure")
     hc.add_argument("--no-contig-ec", dest="contig_ec", action="store_false", default=True,
                      help="skip hapcure contig error-correction step")
     hc.add_argument("--hapcure-opt", action="append", default=[],
@@ -650,6 +654,10 @@ def main(argv=None) -> int:
     if args.force_from and args.force_from not in STEP_NAMES:
         _log(f"error: unknown --force-from step '{args.force_from}', "
              f"expected one of: {', '.join(STEP_NAMES)}")
+        return 1
+
+    if args.agp is not None and not Path(args.agp).is_file():
+        _log(f"error: error-correction AGP not found or not a regular file: {args.agp}")
         return 1
 
     ctx = Ctx(

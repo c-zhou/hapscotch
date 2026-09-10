@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -45,7 +46,8 @@ class PipelineError(RuntimeError):
 
 
 def _log(msg: str) -> None:
-    print(f"[run_pipeline] {msg}", file=sys.stderr, flush=True)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[run_pipeline] [{ts}] {msg}", file=sys.stderr, flush=True)
 
 
 # sibling python submodules - always resolved next to this script, not user-configurable
@@ -95,6 +97,10 @@ class Ctx:
     @property
     def idxfile(self) -> Path:
         return self.datadir / "seq.idx"
+
+    @property
+    def hicaln_dir(self) -> Path:
+        return self.datadir / "hicalns"
 
     @property
     def hapcure_dir(self) -> Path:
@@ -281,17 +287,20 @@ def step_self_align(ctx: Ctx, args) -> Step:
 def step_hic_align(ctx: Ctx, args) -> tuple:
     """Aligns each --hic-file input; returns (Step, resolved_hicalns_fn)."""
     hicfiles = args.hic_file or []
-    generated = [ctx.datadir / f"hicaln.{i}.bam" for i in range(len(hicfiles))]
+    prefixes = [ctx.hicaln_dir / f"hicaln.{i}" for i in range(len(hicfiles))]
+    generated = [Path(f"{prefix}.bam") for prefix in prefixes]
 
     def _applicable() -> bool:
         return len(hicfiles) > 0
 
     def _run():
-        for src, out in zip(hicfiles, generated):
+        ctx.hicaln_dir.mkdir(parents=True, exist_ok=True)
+        for src, prefix, out in zip(hicfiles, prefixes, generated):
             run_cmd(
-                [sys.executable, str(HICALN_PY), str(ctx.seqfile), str(src), "-o", str(out),
-                 "-t", str(ctx.threads), "--tmpdir", str(ctx.datadir)],
-                ctx.logdir / f"hic_align.{out.stem}.log",
+                [sys.executable, str(HICALN_PY), str(ctx.seqfile), str(src),
+                 "-o", str(prefix), "-t", str(ctx.threads),
+                 "--minibwa-bin", args.minibwa_bin, "--samtools-bin", args.samtools_bin],
+                ctx.logdir / f"hic_align.{prefix.name}.log",
             )
 
     def _resolved_hicalns() -> list:
@@ -626,6 +635,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bins.add_argument("--hapcure-bin", default="hapcure")
     bins.add_argument("--yahs-bin", default="yahs")
     bins.add_argument("--fastga-bin", default="FastGA")
+    bins.add_argument("--minibwa-bin", default="minibwa")
+    bins.add_argument("--samtools-bin", default="samtools")
 
     return p
 
@@ -640,6 +651,7 @@ STEP_NAMES = [
 _NON_CRITICAL_PARAM_KEYS = {
     "resume", "force", "force_from", "verbose", "outdir",
     "seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin", "yahs_bin", "fastga_bin",
+    "minibwa_bin", "samtools_bin",
 }
 
 
@@ -660,7 +672,7 @@ def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     outdir = Path(args.outdir) if args.outdir else Path(
-        f"HapScotch_OUT_{__import__('datetime').date.today():%Y%m%d}"
+        f"HapScotch_OUT_{datetime.now():%Y%m%d}"
     )
 
     resuming = bool(args.resume or args.force or args.force_from)

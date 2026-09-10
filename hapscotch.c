@@ -26,32 +26,18 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdbool.h>
-#include <assert.h>
-#include <float.h>
-#include <errno.h>
-#include <math.h>
-#include <zlib.h>
-#include <pthread.h>
 
 #include "ketopt.h"
-#include "kvec.h"
-#include "kseq.h"
-#include "khash.h"
-#include "kthread.h"
 
 #include "paf.h"
 #include "hic.h"
-#include "sdict.h"
-#include "range.h"
-#include "agp-spec.h"
-#include "misc.h"
-
 #include "busco.h"
+#include "sdict.h"
 #include "overlap.h"
 #include "ploidy.h"
 #include "hap.h"
 #include "alnio.h"
+#include "misc.h"
 #include "version.h"
 
 int VERBOSE = 0;

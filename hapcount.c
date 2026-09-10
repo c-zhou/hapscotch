@@ -30,23 +30,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <stdbool.h>
-#include <assert.h>
-#include <float.h>
 #include <errno.h>
-#include <math.h>
 
 #include "ketopt.h"
-#include "kvec.h"
 
 #include "paf.h"
 #include "sdict.h"
-#include "misc.h"
-
 #include "busco.h"
 #include "overlap.h"
 #include "ploidy.h"
 #include "alnio.h"
+#include "misc.h"
 #include "version.h"
 
 int VERBOSE = 0;
@@ -67,7 +61,7 @@ int main(int argc, char *argv[])
     ketopt_t opt = KETOPT_INIT;
     int c, ret = 0;
     int n_threads;
-    FILE *fp_help, *fo;
+    FILE *fp_help;
     sdict_t *dicts, *dicts_raw;
     asm_dict_t *break_dict;
     aln_t *alns;

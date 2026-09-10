@@ -123,6 +123,28 @@ class Ctx:
             d.mkdir(parents=True, exist_ok=True)
 
 
+def link_ref_genome(ctx: Ctx) -> Path:
+    """Symlink the input genome into datadir/ref.fa[.gz] and return that path,
+    for use as the reference from here on instead of ctx.seqfile directly.
+    FastGA (and other tools) write index/database files next to whatever
+    genome path they're given, so operating on a symlink inside datadir keeps
+    those out of the original genome file's directory."""
+    target = ctx.seqfile.resolve()
+    ref_link = ctx.datadir / ("ref.fa.gz" if target.name.endswith(".gz") else "ref.fa")
+    if ref_link.is_symlink():
+        if ref_link.resolve() != target:
+            raise PipelineError(
+                f"{ref_link} already exists and points elsewhere ({ref_link.resolve()}), "
+                f"expected it to point to {target} - remove it or use a fresh OUTDIR"
+            )
+    elif ref_link.exists():
+        raise PipelineError(f"{ref_link} already exists and is not a symlink - "
+                             f"remove it or use a fresh OUTDIR")
+    else:
+        ref_link.symlink_to(target)
+    return ref_link
+
+
 # --------------------------------------------------------------------------- #
 # command execution
 # --------------------------------------------------------------------------- #
@@ -705,6 +727,12 @@ def main(argv=None) -> int:
         yahs_bin=args.yahs_bin,
     )
     ctx.ensure_dirs()
+
+    try:
+        ctx.seqfile = link_ref_genome(ctx)
+    except PipelineError as e:
+        _log(f"ERROR: {e}")
+        return 1
 
     cmd_file = ctx.datadir / "CMD"
     current_params = critical_params(args)

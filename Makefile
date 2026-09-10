@@ -55,7 +55,8 @@ debug: CFLAGS += -DDEBUG
 highs: $(HiGHS_LIB)
 
 $(HiGHS_LIB):
-	+cd $(HiGHS_ROOT) && cmake -S . -B build $(CMAKE_FLAGS) && cmake --build build
+	+cd $(HiGHS_ROOT) && cmake -S . -B build $(CMAKE_FLAGS) && \
+	cmake --build build --target highs
 
 $(LIB_DIR):
 	@mkdir -p $@

@@ -2,6 +2,7 @@
 CFLAGS=		-O3 -Wall -fno-strict-aliasing -Wno-unused-function -Wno-deprecated-declarations -Wno-array-bounds
 CPPFLAGS=
 INCLUDES=
+LDFLAGS=
 OBJS=
 PROG=       hapscotch hapcount hapcure hictools seqtools
 PROG_EXTRA=
@@ -49,7 +50,7 @@ debug: $(PROG)
 debug: CFLAGS += -DDEBUG
 
 %.o: %.c | $(HiGHS_LIB)
-	$(CC) -c $(CFLAGS) $(CPPFLAGS) $(INCLUDES) $(HiGHS_INCLUDES) $< -o $@
+	$(CC) -c $(CFLAGS) $(INCLUDES) $(HiGHS_INCLUDES) $< -o $@
 
 highs: $(HiGHS_LIB)
 
@@ -73,19 +74,19 @@ $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MINOR): $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MA
 	@ln -sf libhighs.$(LIBHiGHS_EXT_MAJOR) $@
 
 hapscotch: hapscotch.o alnio.o busco.o overlap.o ploidy.o hap.o hic.o sdict.o paf.o range.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o | $(HiGHS_OBJS)
-	$(CC) $(CFLAGS) $^ -o $@ -L. $(R_PATH) $(HiGHS_LIBS) $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(R_PATH) $(HiGHS_LIBS) $(LIBS)
 
 hapcount: hapcount.o alnio.o busco.o overlap.o ploidy.o sdict.o paf.o range.o misc.o kthread.o kalloc.o kopen.o
-	$(CC) $(CFLAGS) $^ -o $@ -L. $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 hapcure: hapcure.o ec.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o kopen.o
-	$(CC) $(CFLAGS) $^ -o $@ -L. $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 hictools: hictools.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o kopen.o
-	$(CC) $(CFLAGS) $^ -o $@ -L. $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 seqtools: seqtools.o sdict.o misc.o kalloc.o kopen.o
-	$(CC) $(CFLAGS) $^ -o $@ -L. $(LIBS)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 clean:
 	rm -fr *.o a.out $(PROG) $(OBJS) $(PROG_EXTRA)

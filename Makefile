@@ -75,7 +75,7 @@ $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MINOR): $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MA
 	@ln -sf libhighs.$(LIBHiGHS_EXT_MAJOR) $@
 
 hapscotch: hapscotch.o alnio.o busco.o overlap.o ploidy.o hap.o hic.o sdict.o paf.o range.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o | $(HiGHS_OBJS)
-	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(R_PATH) $(HiGHS_LIBS) $(LIBS)
+	$(CXX) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ -o $@ -L. $(R_PATH) $(HiGHS_LIBS) $(LIBS)
 
 hapcount: hapcount.o alnio.o busco.o overlap.o ploidy.o sdict.o paf.o range.o misc.o kthread.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)

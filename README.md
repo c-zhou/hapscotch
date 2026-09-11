@@ -11,6 +11,8 @@ utilities) and `hapcount` (standalone ploidy estimator) - plus a
 `scripts/run_pipeline.py` driver that runs them end to end.
 
 ## Installation
+
+### From source
 You need a C compiler, GNU make, cmake and zlib/pthread development files.
 
     git clone --recurse-submodules https://github.com/c-zhou/hapscotch.git
@@ -22,6 +24,60 @@ If you already cloned without `--recurse-submodules`, run
 `git submodule update --init --recursive` first - this fetches the bundled
 [HiGHS](https://github.com/ERGO-Code/HiGHS) ILP solver used for Hi-C phasing.
 This produces `hapscotch`, `hapcure`, `hictools`, `seqtools` and `hapcount`.
+This still leaves the external pipeline tools (FastGA/minibwa/samtools/YaHS)
+for you to install separately - see the next options if you want everything
+in one step.
+
+### Conda
+
+* [recipes/environment.yml](recipes/environment.yml) sets up a conda environment
+with the build toolchain plus FastGA/minibwa/samtools/YaHS and the Python
+packages used by `hicmap.py`, then you still build hapscotch itself with `make`:
+
+    ```
+    ## create a conda environment with all dependencies
+    conda env create -f recipes/environment.yml
+    conda activate hapscotch
+    ## build hapscotch
+    make
+    make install  ## optionally install all executables in ~/bin/
+    ## run pipeline
+    python3 scripts/run_pipeline.py --help
+    ```
+
+* [recipes/conda/](recipes/conda/) is a `conda-build` recipe that
+builds hapscotch itself as a conda package (with FastGA/minibwa/samtools/YaHS
+pulled in as run dependencies), so a single `conda install` gives you everything:
+
+    ```
+    ## create a conda environment with all tools
+    conda build recipes/conda/
+    conda create -n hapscotch --use-local hapscotch
+    ## activate the conda environment
+    conda activate hapscotch
+    ## run pipeline 
+    run_pipeline.py --help
+    ```
+
+### Docker / Singularity / Apptainer
+
+* [recipes/Dockerfile](recipes/Dockerfile) builds an image with the full
+pipeline (all five binaries, `scripts/*.py`, and FastGA/minibwa/samtools/YaHS):
+
+    ```
+    docker build -t hapscotch -f recipes/Dockerfile .
+    docker run --rm -v "$PWD":/data -w /data hapscotch run_pipeline.py --help
+    ```
+
+* [recipes/Singularity.def](recipes/Singularity.def) is the equivalent
+Apptainer/Singularity definition, built the same way from the same
+conda-forge/bioconda base:
+
+    ```
+    ## or replace apptainer with singularity
+    apptainer build hapscotch.sif recipes/Singularity.def
+    apptainer exec hapscotch.sif run_pipeline.py --help
+    ```
 
 ## Running the pipeline
 The command `python3 scripts/run_pipeline.py` runs whole pipeline and is resumable:

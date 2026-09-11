@@ -1,0 +1,31 @@
+# Sets up a conda environment with everything needed to build and run the
+# whole HapScotch pipeline (build toolchain + FastGA/minibwa/samtools/YaHS +
+# the Python packages used by scripts/hicmap.py). Does NOT build hapscotch
+# itself - after activating, still run `make` (and optionally `make install`)
+# as usual.
+#
+#   conda env create -f recipes/environment.yml
+#   conda activate hapscotch
+#   git submodule update --init --recursive   # fetch HiGHS, if not already done
+#   make
+#
+# To build hapscotch as an installable conda package instead (bundling it and
+# all of the above into one `conda install`-able package), see recipes/conda/.
+name: hapscotch
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python >=3.8
+  - numpy
+  - matplotlib-base
+  - make
+  - cmake
+  - zlib
+  - c-compiler
+  - cxx-compiler
+  - git
+  - samtools
+  - fastga
+  - minibwa
+  - yahs

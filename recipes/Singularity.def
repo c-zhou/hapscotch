@@ -1,0 +1,35 @@
+# HapScotch - full pipeline image (hapscotch/hapcure/hictools/seqtools/hapcount
+# + FastGA/minibwa/samtools/YaHS + scripts/run_pipeline.py and its helpers).
+# Compatible with both Singularity and Apptainer.
+#
+# Build:  apptainer build hapscotch.sif recipes/Singularity.def   # (or: singularity build ...)
+# Run:    apptainer exec hapscotch.sif run_pipeline.py -h
+#         apptainer shell hapscotch.sif                   # interactive shell
+
+Bootstrap: docker
+From: condaforge/miniforge3:latest
+
+%post
+    mamba create -y -n hapscotch -c conda-forge -c bioconda \
+        python numpy matplotlib-base make cmake zlib \
+        c-compiler cxx-compiler git samtools fastga minibwa yahs
+    mamba clean -afy
+
+    export PATH=/opt/conda/envs/hapscotch/bin:$PATH
+    git clone --recurse-submodules https://github.com/c-zhou/hapscotch.git /opt/hapscotch
+    cd /opt/hapscotch
+    make -j"$(nproc)"
+    mkdir -p /opt/conda/envs/hapscotch/bin/lib
+    cp hapscotch hapcure hictools seqtools hapcount /opt/conda/envs/hapscotch/bin/
+    cp -a lib/. /opt/conda/envs/hapscotch/bin/lib/
+    cp scripts/run_pipeline.py scripts/selfaln.py scripts/hicaln.py scripts/hicmap.py \
+        /opt/conda/envs/hapscotch/bin/
+    chmod +x /opt/conda/envs/hapscotch/bin/*.py
+    cd /
+    rm -rf /opt/hapscotch
+
+%environment
+    export PATH=/opt/conda/envs/hapscotch/bin:$PATH
+
+%runscript
+    exec "$@"

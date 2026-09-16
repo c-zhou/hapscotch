@@ -471,7 +471,7 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
              ctx.logdir / "yahs.seqtools_seq.log",
         )
 
-        bbseq_idx = ctx.yahs_dir / f"{bbseq_fa}.fai" # yahs need .fai not .idx
+        bbseq_idx = f"{bbseq_fa}.fai" # yahs need .fai not .idx
         run_cmd(
             [ctx.seqtools, "idx", "-o", str(bbseq_idx), str(bbseq_fa)],
             ctx.logdir / "yahs.seqtools_idx.log",

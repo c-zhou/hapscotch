@@ -464,14 +464,14 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
                     "(hapscotch only writes these when run with -c/HiC data and -Y)"
                 )
 
-        bbseq_fa = ctx.yahs_dir / "haps.bbseq.fa"
+        bbseq_fa = ctx.yahs_dir / "haps.bbseq.fa.gz"
         run_cmd(
             [ctx.seqtools, "seq", "-a", "-o", str(bbseq_fa), 
              str(ctx.seqfile), str(bbseq_agp)],
              ctx.logdir / "yahs.seqtools_seq.log",
         )
 
-        bbseq_idx = ctx.yahs_dir / "haps.bbseq.fa.fai" # yahs need .fai not .idx
+        bbseq_idx = ctx.yahs_dir / f"{bbseq_fa}.fai" # yahs need .fai not .idx
         run_cmd(
             [ctx.seqtools, "idx", "-o", str(bbseq_idx), str(bbseq_fa)],
             ctx.logdir / "yahs.seqtools_idx.log",
@@ -567,7 +567,7 @@ def step_collect_results(ctx: Ctx, run_yahs_fn) -> Step:
                 ploidy = max((int(line.split()[0]) for line in f), default=0)
             for hap in range(1, ploidy + 1):
                 hap_agp = ctx.results_dir / f"haps.{hap}.agp"
-                hap_fa  = ctx.results_dir / f"haps.{hap}.fa"
+                hap_fa  = ctx.results_dir / f"haps.{hap}.fa.gz"
                 shutil.copy(ctx.yahs_dir / f"haps.{hap}.agp", hap_agp)
                 run_cmd(
                     [ctx.seqtools, "seq", '-a', "-o", str(hap_fa),

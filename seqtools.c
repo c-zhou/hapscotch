@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <zlib.h>
 
 #include "ketopt.h"
@@ -40,6 +41,8 @@
 
 #include "agp-spec.h"
 #include "sdict.h"
+#include "bgzf.h"
+#include "misc.h"
 #include "misc.h"
 #include "version.h"
 
@@ -577,6 +580,7 @@ static void print_help_seq(FILE *fp_help)
     fprintf(fp_help, "    -l INT            line width [60]\n");
     fprintf(fp_help, "    -a                input is in AGP format\n");
     fprintf(fp_help, "    -u                allow U-type AGP sequence components\n");
+    fprintf(fp_help, "    -z                output in BGZF compressed format\n");
     fprintf(fp_help, "    -o STR            output to file [stdout]\n");
     fprintf(fp_help, "    -h, --help        print this help\n");
     fprintf(fp_help, "    -V, --version     show version number\n");
@@ -602,18 +606,18 @@ int main_seq(int argc, char *argv[])
     liftrlimit();
     at_realtime0 = realtime();
 
-    FILE *fo;
     char *fa, *in, *out;
-    int line_wd, agp_input, allow_unknown_oris;
-
-    const char *opt_str = "ao:ul:Vh";
+    int line_wd, agp_input, allow_unknown_oris, bgzf_output;
+    
+    const char *opt_str = "azo:ul:Vh";
     ketopt_t opt = KETOPT_INIT;
     int c;
-    FILE *fp_help = stderr;
+    FILE *fo, *fp_help = stderr;
     fa = in = out = 0;
     line_wd = 60;
     agp_input = 0;
     allow_unknown_oris = 0;
+    bgzf_output = 0;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, seq_long_options)) >= 0) {
         if (c == 'a') {
@@ -623,7 +627,10 @@ int main_seq(int argc, char *argv[])
         } else if (c == 'u') {
             allow_unknown_oris = 1;
         } else if (c == 'o') {
-            out = opt.arg;
+            if (strcmp(opt.arg, "-"))
+                out = opt.arg;
+        } else if (c == 'z') {
+            bgzf_output = 1;
         } else if (c == 'h') {
             fp_help = stdout;
         } else if (c == 'V') {
@@ -652,18 +659,41 @@ int main_seq(int argc, char *argv[])
     fa = argv[opt.ind];
     in = argv[opt.ind + 1];
 
-    fo = out == 0? stdout : fopen(out, "w");
-    if (fo == 0) {
-        fprintf(stderr, "[E::%s] cannot open file %s for writing\n", __func__, out);
-        exit(EXIT_FAILURE);
+    if (out) {
+        char *outf = out;
+        if (bgzf_output && !endsWithDotGz(out)) {
+            MYMALLOC(outf, strlen(out) + 4);
+            if (!outf) {
+                fprintf(stderr, "[E::%s] memory allocation failed\n", __func__);
+                return 1;
+            }
+            sprintf(outf, "%s.gz", out);
+            fprintf(stderr, "[W::%s] output file changed to '%s'\n", __func__, outf);
+        }
+        if (!bgzf_output && endsWithDotGz(out))
+            bgzf_output = 1;
+        if (freopen(outf, "wb", stdout) == NULL) {
+            fprintf(stderr, "[ERROR]\033[1;31m failed to write the output to file '%s'\033[0m: %s\n", outf, strerror(errno));
+            return 1;
+        }
+        if (outf != out) free(outf);
     }
+
+    fo = bgzf_output? bgzf_fopen_write(stdout) : stdout;
+    if (!fo) {
+        fprintf(stderr, "[E::%s] failed to open output stream\n", __func__);
+        return 1;
+    }
+
     if (agp_input)
         write_fasta_file_from_agp(fa, in, fo, line_wd, allow_unknown_oris);
     else
         write_fasta_file_from_reg(fa, in, fo, line_wd);
-
-    if (out != 0)
-        fclose(fo);
+    
+    if (fclose(fo) != 0) {
+        fprintf(stderr, "[E::%s] failed to write the results\n", __func__);
+        return 1;
+    }
 
     fprintf(stderr, "[M::%s] Version: %s\n", __func__, SEQTOOLS_VERSION);
     fprintf(stderr, "[M::%s] CMD:", __func__);

@@ -30,6 +30,20 @@ in one step.
 
 ### Conda
 
+* [recipes/conda/](recipes/conda/) is a `conda-build` recipe that
+builds hapscotch itself as a conda package (with FastGA/minibwa/samtools/YaHS
+pulled in as run dependencies), so a single `conda install` gives you everything:
+
+    ```
+    ## create a conda environment with all tools
+    conda build recipes/conda/
+    conda create -n hapscotch --use-local hapscotch
+    ## activate the conda environment
+    conda activate hapscotch
+    ## run pipeline 
+    run_pipeline.py --help
+    ```
+
 * [recipes/environment.yml](recipes/environment.yml) sets up a conda environment
 with the build toolchain plus FastGA/minibwa/samtools/YaHS and the Python
 packages used by `hicmap.py`, then you still build hapscotch itself with `make`:
@@ -43,20 +57,6 @@ packages used by `hicmap.py`, then you still build hapscotch itself with `make`:
     make install  ## optionally install all executables in ~/bin/
     ## run pipeline
     python3 scripts/run_pipeline.py --help
-    ```
-
-* [recipes/conda/](recipes/conda/) is a `conda-build` recipe that
-builds hapscotch itself as a conda package (with FastGA/minibwa/samtools/YaHS
-pulled in as run dependencies), so a single `conda install` gives you everything:
-
-    ```
-    ## create a conda environment with all tools
-    conda build recipes/conda/
-    conda create -n hapscotch --use-local hapscotch
-    ## activate the conda environment
-    conda activate hapscotch
-    ## run pipeline 
-    run_pipeline.py --help
     ```
 
 ### Docker / Singularity / Apptainer
@@ -125,11 +125,11 @@ Final outputs (`OUTDIR/4.results`):
     haps.grp.txt               per-contig haplotype assignment
     haps.grp.agp               scaffold groups constructed from synteny
     haps.cnt.txt               estimated haplotype number/ploidy
-    haps.all.agp               scaffolds combining Hi-C [all haplotypes]      | only if the YaHS ran
-    haps.[1-9][0-9]*.agp       scaffolds combining Hi-C [each haplotype]      | only if the YaHS ran
-    haps.[1-9][0-9]*.fa        scaffolds combining Hi-C [each haplotype]      | only if the YaHS ran
-    haps.all.hic.png/.pdf      Hi-C contact map for the scaffolded assembly   | only if the YaHS ran
-    
+                               /** addtional files with YaHS module **/
+    haps.all.agp               scaffolds combining Hi-C [all haplotypes]
+    haps.[1-9][0-9]*.agp       scaffolds combining Hi-C [each haplotype]
+    haps.[1-9][0-9]*.fa.gz     scaffolds combining Hi-C [each haplotype]
+    haps.all.hic.png/.pdf      Hi-C contact map for the scaffolded assembly
 
 Those files in the result folder can be used combining with `seqtools seq` to generate various types of FASTA output.
 

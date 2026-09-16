@@ -86,7 +86,7 @@ hapcure: hapcure.o ec.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o k
 hictools: hictools.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
-seqtools: seqtools.o sdict.o misc.o kalloc.o kopen.o
+seqtools: seqtools.o sdict.o bgzf.o misc.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 clean:
@@ -105,6 +105,7 @@ sdict.o: sdict.h agp-spec.h misc.h khash.h ksort.h kseq.h kvec.h
 paf.o: paf.h misc.h kseq.h
 cov.o: cov.h
 bamlite.o: bamlite.h
+bgzf.o: bgzf.h
 range.o: range.h misc.h kavl.h
 misc.o: misc.h kseq.h
 kthread.o: kthread.h
@@ -118,7 +119,7 @@ overlap.o: overlap.h misc.h kvec.h kthread.h sdict.h
 ploidy.o: ploidy.h overlap.h misc.h kvec.h sdict.h range.h
 hap.o: hap.h busco.h overlap.h ploidy.h misc.h sdict.h agp-spec.h range.h hic.h kvec.h kthread.h
 hic.o: hic.h sdict.h cov.h misc.h ketopt.h kvec.h kseq.h khash.h ONElib.h
+ec.o: ec.h hic.h sdict.h misc.h kvec.h
 hictools.o: hic.h sdict.h misc.h bamlite.h khash.h kstring.h kvec.h ketopt.h version.h
 hapcure.o: ec.h hic.h sdict.h misc.h ketopt.h version.h
-ec.o: ec.h hic.h sdict.h misc.h kvec.h
-seqtools.o: agp-spec.h sdict.h misc.h kvec.h kstring.h ketopt.h version.h
+seqtools.o: agp-spec.h sdict.h bgzf.h misc.h kvec.h kstring.h ketopt.h version.h

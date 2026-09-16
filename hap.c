@@ -804,7 +804,7 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     // maximum sequence length in windows
     mseq = 0;
     for (i = 0; i < nseq; i++) {
-        s = dicts->s[i].len / HIC_NORM_WINDOW;
+        s = (dicts->s[i].len - 1) / HIC_NORM_WINDOW + 1;
         if (s > mseq) mseq = s;
     }
 

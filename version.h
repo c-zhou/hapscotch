@@ -24,8 +24,8 @@
 
 // central place for the version string of every command line program
 
-#ifndef VERSION_H
-#define VERSION_H
+#ifndef VERSION_H_
+#define VERSION_H_
 
 #define HAPSCOTCH_VERSION "0.1"
 #define HAPCOUNT_VERSION  "0.1"
@@ -33,4 +33,4 @@
 #define HICTOOLS_VERSION  "0.1"
 #define SEQTOOLS_VERSION  "0.1"
 
-#endif // VERSION_H
+#endif // VERSION_H_

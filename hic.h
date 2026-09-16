@@ -62,12 +62,14 @@ typedef struct {
 #ifdef __cplusplus 
 extern "C" {
 #endif
+
 char *write_binary_hic_data(char *f, fileType_t f_type, sdict_t *dicts, int read_len, char *out);
 char *write_binary_hic_data_multi(char **files, int n_files, fileType_t f_type, sdict_t *dicts, int read_len, char *out);
 hic_t *read_hic_from_binary(char *bf, sdict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic);
 hic_t *read_hic_from_binary_sd_conversion(char *hic_bfile, asm_dict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic);
 void write_binary_hic_data_pseudo_yahs(char *bf, sdict_t *dicts, asm_dict_t *break_dict, int32 **smap, char *out);
 int match_binary_file_sdict(char *f, sdict_t *dict);
+
 #ifdef __cplusplus
 }
 #endif

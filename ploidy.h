@@ -24,8 +24,8 @@
 
 // Genome coverage histograms and ploidy number estimation
 
-#ifndef PLOIDY_H
-#define PLOIDY_H
+#ifndef PLOIDY_H_
+#define PLOIDY_H_
 
 #include "misc.h"
 #include "kvec.h"
@@ -50,6 +50,10 @@ typedef kvec_t(srange_t) srange_vec_t;
 // upper limit of genome ploidy number to consider, settable via -P/--max-ploidy
 extern int MAX_PLOIDY_NUMBER;
 
+#ifdef __cplusplus 
+extern "C" {
+#endif
+
 int srange_cmpfunc(const void *a, const void *b);
 
 int64 pts_from_overlaps(void *data, int64 n, void *param, int *points);
@@ -67,4 +71,8 @@ void report_genome_coverage_histogram(aln_t *alns, int64 naln, sdict_t *dicts, i
 int estimate_ploidy_number(ovl_t *ovls, int64 novl, sdict_t *dicts);
 void genome_coverage_summary(rangetree_t *rt, sdict_t *dicts, int max_copy);
 
-#endif // PLOIDY_H
+#ifdef __cplusplus
+}
+#endif
+
+#endif // PLOIDY_H_

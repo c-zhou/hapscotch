@@ -25,8 +25,8 @@
 // Pseudo haplotype / scaffold construction: HiC linkage, haplotype
 // partitioning (greedy / ILP / heuristic phasing) and AGP scaffold output.
 
-#ifndef HAP_H
-#define HAP_H
+#ifndef HAP_H_
+#define HAP_H_
 
 #include "misc.h"
 #include "sdict.h"
@@ -55,6 +55,11 @@ typedef struct {
     uint64 *segs; // beg << 32 | len
 } scf_t;
 
+
+#ifdef __cplusplus 
+extern "C" {
+#endif
+
 void scf_free(scf_t *scf);
 int scaff_natural_cmpfunc(const void *a, const void *b);
 
@@ -64,4 +69,8 @@ scf_t *build_pseudo_scaffolds(ovl_t *ovls, int64 novl, sdict_t *dicts, asm_dict_
 
 void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_dict, const uint8 opts_out, const char *pref_out);
 
-#endif // HAP_H
+#ifdef __cplusplus
+}
+#endif
+
+#endif // HAP_H_

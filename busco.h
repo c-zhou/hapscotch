@@ -24,8 +24,8 @@
 
 // BUSCO gene table loading and copy-number summary reporting
 
-#ifndef BUSCO_H
-#define BUSCO_H
+#ifndef BUSCO_H_
+#define BUSCO_H_
 
 #include "khash.h"
 #include "sdict.h"
@@ -62,9 +62,17 @@ typedef struct {
 // e.g., "C:98.5%[S:97.0%,D:1.5%],F:0.8%,M:0.7%,n:1234"
 extern char BUSCO_SUMMARY_STRING[64];
 
+#ifdef __cplusplus 
+extern "C" {
+#endif
+
 busco_table_t *build_busco_gene_table(const char *fn, sdict_t *dicts, asm_dict_t *break_dict);
 void busco_destroy(busco_table_t *buscos);
 void busco_summary_report(busco_table_t *buscos, seq_range_t *ranges, int nrange, int print_summary, int max_hist);
 void busco_summary_report_all_seqs(busco_table_t *buscos, sdict_t *dicts);
 
-#endif // BUSCO_H
+#ifdef __cplusplus
+}
+#endif
+
+#endif // BUSCO_H_

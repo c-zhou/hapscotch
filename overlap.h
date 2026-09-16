@@ -26,8 +26,8 @@
 // glocally chained sequence overlaps used for ploidy estimation and
 // pseudo haplotype/scaffold construction.
 
-#ifndef OVERLAP_H
-#define OVERLAP_H
+#ifndef OVERLAP_H_
+#define OVERLAP_H_
 
 #include "misc.h"
 #include "kvec.h"
@@ -119,6 +119,11 @@ typedef struct point_info {
     int cnt;
 } point_info_t;
 
+
+#ifdef __cplusplus 
+extern "C" {
+#endif
+
 int aln_coords_cmpfunc(const void *a, const void *b);
 aln_t *add_dual_alignments(aln_t *alns, int64 naln, int64 *_naln);
 
@@ -156,4 +161,8 @@ ovl_t *build_adaptive_chains(aln_t *alns, int64 naln, sdict_t *dicts, int n_thre
 int64 make_chord(aln_t *alns, int64 naln, int slen, chord_t *chord, point_info_t *point);
 int64 make_chord_from_ranges(range_t *ranges, int64 n, chord_t *chord, point_info_t *point, int sorted);
 
-#endif // OVERLAP_H
+#ifdef __cplusplus
+}
+#endif
+
+#endif // OVERLAP_H_

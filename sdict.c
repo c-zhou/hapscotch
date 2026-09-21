@@ -525,7 +525,8 @@ void add_unplaced_short_seqs(asm_dict_t *d, uint32 min_len)
     asm_index(d);
 }
 
-int cmp_uint64_d(const void *a, const void *b) {
+int cmp_uint64_d(const void *a, const void *b) 
+{
     // decreasing order
     uint64 x, y;
     x = *(uint64 *) a;

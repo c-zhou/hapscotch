@@ -63,7 +63,8 @@ static const unsigned char BGZF_EOF_BLOCK[28] = {
 };
 
 // BGZF block containing up to BGZF_MAX_BLOCK_SIZE bytes of raw data
-int write_bgzf_block(bgzf_writer_t *bw) {
+int write_bgzf_block(bgzf_writer_t *bw) 
+{
     unsigned char *data = bw->buf;
     size_t length = bw->len;
     FILE *out = bw->out;
@@ -130,7 +131,8 @@ int write_bgzf_block(bgzf_writer_t *bw) {
 }
 
 // Writes buffer as a sequence of BGZF blocks + EOF block
-int write_bgzf_file(const char *filename, const unsigned char *data, size_t total_length) {
+int write_bgzf_file(const char *filename, const unsigned char *data, size_t total_length) 
+{
     FILE *out = fopen(filename, "wb");
     if (!out) return -1;
 
@@ -144,7 +146,8 @@ int write_bgzf_file(const char *filename, const unsigned char *data, size_t tota
     return ret;
 }
 
-bgzf_writer_t *bgzf_writer_open(FILE *out) {
+bgzf_writer_t *bgzf_writer_open(FILE *out) 
+{
     if (!out) return NULL;
     bgzf_writer_t *bw;
     MYMALLOC(bw, 1);
@@ -156,7 +159,8 @@ bgzf_writer_t *bgzf_writer_open(FILE *out) {
     return bw;
 }
 
-int bgzf_writer_write(bgzf_writer_t *bw, const void *data, size_t len) {
+int bgzf_writer_write(bgzf_writer_t *bw, const void *data, size_t len) 
+{
     if (!bw || bw->error) return -1;
 
     const unsigned char *p = (const unsigned char *)data;
@@ -178,7 +182,8 @@ int bgzf_writer_write(bgzf_writer_t *bw, const void *data, size_t len) {
     return 0;
 }
 
-int bgzf_writer_close(bgzf_writer_t *bw) {
+int bgzf_writer_close(bgzf_writer_t *bw) 
+{
     if (!bw) return -1;
 
     int ret = bw->error ? -1 : 0;
@@ -191,7 +196,8 @@ int bgzf_writer_close(bgzf_writer_t *bw) {
     return ret;
 }
 
-int endsWithDotGz(const char *f) {
+int endsWithDotGz(const char *f) 
+{
     if (!f) return 0;
     size_t len = strlen(f);
     if (len < 3) return 0;
@@ -208,17 +214,20 @@ int endsWithDotGz(const char *f) {
 
 #if defined(BGZF_USE_FUNOPEN)
 
-static int bgzf_stream_write(void *cookie, const char *buf, int nbytes) {
+static int bgzf_stream_write(void *cookie, const char *buf, int nbytes) 
+{
     if (nbytes < 0) return -1;
     if (bgzf_writer_write((bgzf_writer_t *)cookie, buf, (size_t)nbytes) != 0) return -1;
     return nbytes;
 }
 
-static int bgzf_stream_close(void *cookie) {
+static int bgzf_stream_close(void *cookie) 
+{
     return bgzf_writer_close((bgzf_writer_t *)cookie);
 }
 
-FILE *bgzf_fopen_write(FILE *out) {
+FILE *bgzf_fopen_write(FILE *out) 
+{
     bgzf_writer_t *bw = bgzf_writer_open(out);
     if (!bw) return NULL;
 
@@ -233,16 +242,19 @@ FILE *bgzf_fopen_write(FILE *out) {
 
 #elif defined(BGZF_USE_FOPENCOOKIE)
 
-static ssize_t bgzf_stream_write(void *cookie, const char *buf, size_t size) {
+static ssize_t bgzf_stream_write(void *cookie, const char *buf, size_t size) 
+{
     if (bgzf_writer_write((bgzf_writer_t *)cookie, buf, size) != 0) return -1;
     return (ssize_t)size;
 }
 
-static int bgzf_stream_close(void *cookie) {
+static int bgzf_stream_close(void *cookie) 
+{
     return bgzf_writer_close((bgzf_writer_t *)cookie);
 }
 
-FILE *bgzf_fopen_write(FILE *out) {
+FILE *bgzf_fopen_write(FILE *out) 
+{
     bgzf_writer_t *bw = bgzf_writer_open(out);
     if (!bw) return NULL;
 
@@ -263,7 +275,8 @@ FILE *bgzf_fopen_write(FILE *out) {
 
 #else
 
-FILE *bgzf_fopen_write(FILE *out) {
+FILE *bgzf_fopen_write(FILE *out) 
+{
     (void)out;
     return NULL;
 }
@@ -273,7 +286,8 @@ FILE *bgzf_fopen_write(FILE *out) {
 #ifdef TEST_BZGF_WRITER
 #include <errno.h>
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[]) 
+{
     const char *seq1 = ">seq1\nACCTGGCAGT\nAACCG";
     const char *seq2 = ">seq2\nTTGACCAGTG";
 

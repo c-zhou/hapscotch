@@ -37,10 +37,13 @@
 #include "ploidy.h"
 #include "hap.h"
 #include "alnio.h"
+#include "ec.h"
 #include "misc.h"
 #include "version.h"
 
 int VERBOSE = 0;
+
+static void contig_error_correction(char *hic_bfile, sdict_t *dicts, char *agp_ec);
 
 static inline long parse_time(const char *str, long default_val)
 {
@@ -77,8 +80,14 @@ static ko_longopt_t long_options[] = {
     { "file-type",      ko_required_argument, 302 },
     { "time-limit",     ko_required_argument, 303 },
     { "mip-rel-gap",    ko_required_argument, 304 },
+    { "ec-bin-size",    ko_required_argument, 305 },
+    { "ec-min-frag",    ko_required_argument, 306 },
+    { "ec-med-drop",    ko_required_argument, 307 },
+    { "ec-rec-rate",    ko_required_argument, 308 },
+    { "ec-p-thresh",    ko_required_argument, 309 },
     { "hic-file",       ko_required_argument, 'c' },
     { "agp-file",       ko_required_argument, 'a' },
+    { "no-contig-ec",   ko_no_argument,       'E' },
     { "min-extension",  ko_required_argument, 'B' },
     { "ploidy",         ko_required_argument, 'p' },
     { "max-ploidy",     ko_required_argument, 'P' },
@@ -106,7 +115,7 @@ static inline int yes_or_no(int long_idx, const char *arg)
 
 int main(int argc, char *argv[])
 { 
-    const char *opt_str = "a:c:DYB:p:P:t:l:g:o:v:Vh";
+    const char *opt_str = "a:c:DYB:Ep:P:t:l:g:o:v:Vh";
     ketopt_t opt = KETOPT_INIT;
     int c, long_help = 0, ret = 0;
     int n_threads;
@@ -120,8 +129,8 @@ int main(int argc, char *argv[])
     fileType_t f_type;
     int64 i, naln, novl, nscf;
     uint8 opts_out, conf_yahs;
-    int ploidy_num, dual_aln, min_ext, read_len, min_qual;
-    char *busco_file, *hic_file, *hic_bfile, *agp_file, *pref_out;
+    int ploidy_num, dual_aln, min_ext, read_len, min_qual, no_ec;
+    char *busco_file, *hic_file, *hic_bfile, *agp_file, *agp_ec, *pref_out;
     
     sys_init();
     srand48(42);
@@ -132,6 +141,7 @@ int main(int argc, char *argv[])
     read_len = 150;
     min_qual = 1;
     dual_aln = 1;
+    no_ec = 0;
     n_threads = 1;
     busco_file = 0;
     hic_file = 0;
@@ -149,6 +159,7 @@ int main(int argc, char *argv[])
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 'p') ploidy_num = atoi(opt.arg);
         else if (c == 'D') dual_aln = 0;
+        else if (c == 'E') no_ec = 1;
         else if (c == 'a') agp_file = opt.arg;
         else if (c == 'c') hic_file = opt.arg;
         else if (c == 'q') min_qual = atoi(opt.arg);
@@ -177,6 +188,11 @@ int main(int argc, char *argv[])
         }
         else if (c == 303) HIGHS_TIME_LIMIT = parse_time(opt.arg, HIGHS_TIME_LIMIT);
         else if (c == 304) HIGHS_MIP_REL_GAP = atof(opt.arg);
+        else if (c == 305) ec_conf.bin_size = parse_num(opt.arg);
+        else if (c == 306) ec_conf.min_frag = parse_num(opt.arg);
+        else if (c == 307) ec_conf.med_drop = atof(opt.arg);
+        else if (c == 308) ec_conf.rec_rate = atof(opt.arg);
+        else if (c == 309) ec_conf.p_thresh = atof(opt.arg);
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -204,6 +220,17 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -g FILE                BUSCO gene full table (for statistics only)\n");
         fprintf(fp_help, "    -a FILE                AGP file of assembly error corrected sequences\n");
+        fprintf(fp_help, "    -E                     do not perform error correction\n");
+        if (long_help) {
+            fprintf(fp_help, "\n");
+            fprintf(fp_help, "    Hapcure options for error correction:\n");
+            fprintf(fp_help, "      --ec-bin-size NUM    bin size for counting hic links [1k]\n");
+            fprintf(fp_help, "      --ec-min-frag NUM    minimum retained fragment size [10k]\n");
+            fprintf(fp_help, "      --ec-med-drop FLOAT  minimum median drop to call a break [.3]\n");
+            fprintf(fp_help, "      --ec-rec-rate FLOAT  minimum recovery rate for a breakpoint [0.8]\n");
+            fprintf(fp_help, "      --ec-p-thresh FLOAT  p-value threshold for calling errors [0.01]\n");
+            fprintf(fp_help, "\n");
+        }
         fprintf(fp_help, "    -D                     input alignments are not dual mappings\n");
         fprintf(fp_help, "    -Y                     write files needed for YaHS scaffolding\n");
         fprintf(fp_help, "    -B NUM                 minimum sequence size for scaffold extension bridging [50k]\n");
@@ -218,8 +245,8 @@ int main(int argc, char *argv[])
         if (long_help) {
             fprintf(fp_help, "\n");
             fprintf(fp_help, "    HiGHS options for HiC phasing:\n");
-        fprintf(fp_help, "      --time-limit STR     time limit for HiC phasing optimisation [%lds]\n", HIGHS_TIME_LIMIT);
-        fprintf(fp_help, "      --mip-rel-gap FLOAT  relative gap tolerance for HiC phasing optimisation [%.1e]\n", HIGHS_MIP_REL_GAP);
+            fprintf(fp_help, "      --time-limit STR     time limit for HiC phasing optimisation [%lds]\n", HIGHS_TIME_LIMIT);
+            fprintf(fp_help, "      --mip-rel-gap FLOAT  relative gap tolerance for HiC phasing optimisation [%.1e]\n", HIGHS_MIP_REL_GAP);
             fprintf(fp_help, "\n");
         }
         fprintf(fp_help, "    -v INT                 verbose level [%d]\n", VERBOSE);
@@ -261,19 +288,43 @@ int main(int argc, char *argv[])
     // read sequence dictionary
     dicts_raw = make_sdict_from_index(argv[opt.ind], 0);
 
+    // convert hic data to binary format for fast access
+    // HiC alignments are always on the raw (uncorrected) sequences
+    hic_bfile = NULL;
+    hic_bfile = write_binary_hic_data(hic_file, f_type, dicts_raw, read_len, pref_out);
+
+    ret = match_binary_file_sdict(hic_bfile, dicts_raw);
+    if (ret) {
+        fprintf(stderr, "[E::%s] HiC BIN sequence dictionary does not match genome: %d\n", __func__, ret);
+        free(hic_bfile);
+        sd_destroy(dicts_raw);
+        return 1;
+    }
+
     // read AGP file of error corrected sequences
     // the working dictionary is made of the corrected sequence pieces
     break_dict = NULL;
-    dicts = dicts_raw;
-    if (agp_file) {
-        break_dict = make_asm_dict_from_agp(dicts_raw, agp_file, 0);
+    agp_ec = agp_file;
+    if (!agp_ec && hic_bfile && !no_ec) {
+        MYMALLOC(agp_ec, strlen(pref_out) + 12);
+        sprintf(agp_ec, "%s.ec.agp", pref_out);
+        contig_error_correction(hic_bfile, dicts_raw, agp_ec);
+    }
+    if (agp_ec) {
+        break_dict = make_asm_dict_from_agp(dicts_raw, agp_ec, 0);
         if (break_dict == NULL) {
-            fprintf(stderr, "[E::%s] failed to parse AGP file %s\n", __func__, agp_file);
+            fprintf(stderr, "[E::%s] failed to parse AGP file %s\n", __func__, agp_ec);
             return 1;
         }
+        if (agp_ec != agp_file) free(agp_ec);
+    }
+
+    // make dicts from break_dict if exists
+    dicts = dicts_raw;
+    if (break_dict) {
         validate_break_agp(break_dict);
         dicts = make_piece_sdict(break_dict);
-        fprintf(stderr, "[M::%s] %u sequences broken into %u pieces by AGP file %s\n", __func__, dicts_raw->n, dicts->n, agp_file);
+        fprintf(stderr, "[M::%s] %u sequences broken into %u pieces\n", __func__, dicts_raw->n, dicts->n);
     }
 
     // read busco gene table
@@ -330,12 +381,6 @@ int main(int argc, char *argv[])
     // detect structure variants or misassemblies
     //detect_structural_variants(ovls, novl, dicts, ploidy_num);
 
-
-    // convert hic data to binary format for fast access
-    // HiC alignments are always on the raw (uncorrected) sequences
-    hic_bfile = NULL;
-    hic_bfile = write_binary_hic_data(hic_file, f_type, dicts_raw, read_len, pref_out);
-
     // build pseudo scaffolds
     nscf = 0;
     scfs = build_pseudo_scaffolds(ovls, novl, dicts, break_dict, buscos, ploidy_num, min_ext, min_qual, n_threads, conf_yahs, hic_bfile, pref_out, &nscf);
@@ -376,4 +421,42 @@ int main(int argc, char *argv[])
     }
 
     return 0;
+}
+
+static void contig_error_correction(char *hic_bfile, sdict_t *dicts, char *agp_ec)
+{
+    if (!hic_bfile || !dicts) return;
+    
+    asm_dict_t *break_dict;
+    ec_pos_t *calls;
+    FILE *fo;
+    int64 nhic;
+    hic_t *hics;
+    int ncall;
+
+    break_dict = make_asm_dict_from_sdict(dicts);
+    nhic = 0;
+    hics = read_hic_from_binary_sd_conversion(hic_bfile, break_dict, ec_conf.bin_size, 0, &nhic);
+    asm_destroy(break_dict);
+    if (hics == NULL || nhic == 0) {
+        fprintf(stderr, "[E::%s] no usable HiC contacts found\n", __func__);
+        return;
+    }
+
+    ncall = 0;
+    calls = ec_call_breaks(hics, nhic, dicts, &ncall);
+    free(hics);
+    
+    fo = fopen(agp_ec, "w");
+    if (fo == NULL) {
+        fprintf(stderr, "[E::%s] cannot write file %s\n", __func__, agp_ec);
+        goto cleanup;
+    }
+    ec_write_agp(calls, ncall, dicts, fo);
+    fclose(fo);
+    fprintf(stderr, "[M::%s] wrote corrected AGP: %s\n", __func__, agp_ec);
+
+cleanup:
+    free(calls);
+    return;
 }

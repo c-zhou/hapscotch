@@ -74,7 +74,7 @@ $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MAJOR): $(LIB_DIR)/libhighs.$(SHARED_EXT)
 $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MINOR): $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MAJOR)
 	@ln -sf libhighs.$(LIBHiGHS_EXT_MAJOR) $@
 
-hapscotch: hapscotch.o alnio.o busco.o overlap.o ploidy.o hap.o hic.o sdict.o paf.o range.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o | $(HiGHS_OBJS)
+hapscotch: hapscotch.o alnio.o busco.o overlap.o ploidy.o hap.o hic.o sdict.o paf.o ec.o range.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o | $(HiGHS_OBJS)
 	$(CXX) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ -o $@ -L. $(R_PATH) $(HiGHS_LIBS) $(LIBS)
 
 hapcount: hapcount.o alnio.o busco.o overlap.o ploidy.o sdict.o paf.o range.o misc.o kthread.o kalloc.o kopen.o
@@ -111,8 +111,6 @@ misc.o: misc.h kseq.h
 kthread.o: kthread.h
 kalloc.o: kalloc.h
 ONElib.o: ONElib.h
-hapscotch.o: paf.h hic.h sdict.h agp-spec.h misc.h ketopt.h kvec.h kseq.h khash.h kthread.h busco.h overlap.h ploidy.h hap.h alnio.h version.h
-hapcount.o: paf.h sdict.h misc.h ketopt.h kvec.h busco.h overlap.h ploidy.h alnio.h version.h
 alnio.o: alnio.h misc.h sdict.h overlap.h paf.h kvec.h
 busco.o: busco.h khash.h sdict.h agp-spec.h misc.h kseq.h kvec.h
 overlap.o: overlap.h misc.h kvec.h kthread.h sdict.h
@@ -121,5 +119,7 @@ hap.o: hap.h busco.h overlap.h ploidy.h misc.h sdict.h agp-spec.h range.h hic.h 
 hic.o: hic.h sdict.h cov.h misc.h ketopt.h kvec.h kseq.h khash.h ONElib.h
 ec.o: ec.h hic.h sdict.h misc.h kvec.h
 hictools.o: hic.h sdict.h misc.h bamlite.h khash.h kstring.h kvec.h ketopt.h version.h
-hapcure.o: ec.h hic.h sdict.h misc.h ketopt.h version.h
 seqtools.o: agp-spec.h sdict.h bgzf.h misc.h kvec.h kstring.h ketopt.h version.h
+hapcure.o: ec.h hic.h sdict.h misc.h ketopt.h version.h
+hapcount.o: paf.h sdict.h misc.h ketopt.h kvec.h busco.h overlap.h ploidy.h alnio.h version.h
+hapscotch.o: ec.h paf.h hic.h sdict.h agp-spec.h misc.h ketopt.h kvec.h kseq.h khash.h kthread.h busco.h overlap.h ploidy.h hap.h alnio.h version.h

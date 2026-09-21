@@ -1752,7 +1752,8 @@ static int govl_abseq_cmpfunc(const void *a, const void *b)
 // min-heap on delta (most negative = most improving = highest priority).
 typedef struct { double delta; int partner; } swap_prior_t;
 static void swap_prior_cpyfunc(void *x, void *y) { *(swap_prior_t*)x = *(swap_prior_t*)y; }
-static int swap_prior_cmpfunc(void *x, void *y) {
+static int swap_prior_cmpfunc(void *x, void *y) 
+{
     double da = ((swap_prior_t*)x)->delta, db = ((swap_prior_t*)y)->delta;
     return (da > db) - (da < db);
 }
@@ -1820,7 +1821,8 @@ static int best_swap_partner(int g, int *grp_rank, int *grp_order, int ngrp,
 // max-heap on gain.
 typedef struct { double gain; int best_rank; int hap; } lmove_prior_t;
 static void lmove_prior_cpyfunc(void *x, void *y) { *(lmove_prior_t*)x = *(lmove_prior_t*)y; }
-static int lmove_prior_cmpfunc(void *x, void *y) {
+static int lmove_prior_cmpfunc(void *x, void *y) 
+{
     double da = ((lmove_prior_t*)x)->gain, db = ((lmove_prior_t*)y)->gain;
     return (da > db) - (da < db);   // max-heap: larger gain = higher priority
 }
@@ -6359,7 +6361,8 @@ static int grp_info_cmpfunc(const void *a, const void *b)
     return (ga->g > gb->g) - (ga->g < gb->g); // sort by group id ascending
 }
 
-static inline int ccompare(int k, int p, int64 *hcft, int64 *hovl, int64 *hhlk, int64 *hseq) {
+static inline int ccompare(int k, int p, int64 *hcft, int64 *hovl, int64 *hhlk, int64 *hseq) 
+{
     int d;
     if ((d = (hcft[k] > hcft[p]) - (hcft[k] < hcft[p]))) return d;
     if ((d = (hovl[k] > hovl[p]) - (hovl[k] < hovl[p]))) return d;
@@ -6369,7 +6372,8 @@ static inline int ccompare(int k, int p, int64 *hcft, int64 *hovl, int64 *hhlk, 
 
 typedef struct { int u, v; double w; } seed_edge_t;
 
-static int cmp_seed_edge_desc(const void *pa, const void *pb) {
+static int cmp_seed_edge_desc(const void *pa, const void *pb) 
+{
     double wa = ((const seed_edge_t *)pa)->w;
     double wb = ((const seed_edge_t *)pb)->w;
     return (wa < wb) - (wa > wb); // descending

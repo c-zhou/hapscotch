@@ -30,36 +30,31 @@
 
 typedef struct {
     int bin_size;
-    int max_distance;
-    int control_window;
-    int min_fragment;
-    int min_contacts;
-    double max_ratio;
-    double fdr;
+    int min_frag;
+    double med_drop;
+    double rec_rate;
+    double p_thresh;
 } ec_conf_t;
 
 typedef struct {
-    uint32 seq;
-    uint32 bin;
+    int seq;
     uint32 pos;
-    double observed;
-    double expected;
-    double ratio;
-    double z;
-    double p;
-    double q;
-    int accepted;
-} ec_candidate_t;
+    double cnts[3];
+    double pval;
+} ec_pos_t;
 
-typedef struct {
-    ec_candidate_t *a;
-    int64 n;
-} ec_candidates_t;
+extern ec_conf_t ec_conf;
 
-void ec_conf_init(ec_conf_t *conf);
-int ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, ec_conf_t *conf, ec_candidates_t *cands);
-void ec_candidates_destroy(ec_candidates_t *cands);
-void ec_write_report(ec_candidates_t *cands, sdict_t *dicts, FILE *fo);
-void ec_write_agp(ec_candidates_t *cands, sdict_t *dicts, FILE *fo);
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall);
+void ec_write_report(ec_pos_t *calls, int ncall, sdict_t *dicts, FILE *fo);
+void ec_write_agp(ec_pos_t *calls, int ncall, sdict_t *dicts, FILE *fo);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* EC_H_ */

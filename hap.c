@@ -11848,7 +11848,7 @@ scf_t *build_pseudo_scaffolds(ovl_t *ovls, int64 novl, sdict_t *dicts, asm_dict_
 void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_dict, const uint8 opts_out, const char *pref_out)
 {
     FILE *fo;
-    char *file, *name, *sname;
+    char *file, *name, *sid;
     int i, j, t, grp, hap, nctg;
     uint32 *ctgs, rid, rev, beg, end, len;
     uint64 *segs, slen;
@@ -11897,6 +11897,7 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     if (opts_out & GRP_OUT) {
         sprintf(file, "%s.grp.txt", pref_out);
         fo = fopen(file, "w");
+        fprintf(fo, "#s_id\ts_beg\ts_end\tgrp\thap\tscf\n");
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 
             grp = scf->grp+1;
@@ -11905,13 +11906,18 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
             ctgs = scf->ctgs;
             segs = scf->segs;
             for (j = 0; j < nctg; j++) {
-                sname = dicts->s[ctgs[j]>>1].name;
+                rid = ctgs[j] >> 1;
+                beg = segs[j] >> 32;
+                end = beg + (uint32) segs[j];
+                sid = dicts->s[rid].name;
                 if (break_dict) {
                     // compose back onto the raw sequence coordinates
-                    cseg = &break_dict->seg[break_dict->s[ctgs[j]>>1].s];
-                    sname = break_dict->sdict->s[cseg->c>>1].name;
+                    cseg = &break_dict->seg[break_dict->s[rid].s];
+                    beg = cseg->x + beg;
+                    end = cseg->x + end;
+                    sid = break_dict->sdict->s[cseg->c>>1].name;
                 }
-                fprintf(fo, "%s %8d %8d %8d %10u\n", sname, grp, hap, i+1, (uint32) segs[j]);
+                fprintf(fo, "%s\t%u\t%u\t%d\t%d\t%d\n", sid, beg, end, grp, hap, i+1);
             }
         }
         fclose(fo);
@@ -11928,13 +11934,19 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
             ctgs = scf->ctgs;
             segs = scf->segs;
             for (j = 0; j < nctg; j++) {
-                sname = dicts->s[ctgs[j]>>1].name;
+                rid = ctgs[j] >> 1;
+                rev = ctgs[j] & 1;
+                beg = segs[j] >> 32;
+                end = beg + (uint32) segs[j];
+                sid = dicts->s[rid].name;
                 if (break_dict) {
                     // compose back onto the raw sequence coordinates
-                    cseg = &break_dict->seg[break_dict->s[ctgs[j]>>1].s];
-                    sname = break_dict->sdict->s[cseg->c>>1].name;
+                    cseg = &break_dict->seg[break_dict->s[rid].s];
+                    beg = cseg->x + beg;
+                    end = cseg->x + end;
+                    sid = break_dict->sdict->s[cseg->c>>1].name;
                 }
-                fprintf(fo, "@%s%c\tLG%d.H%d %10u\n", sname, "+-"[ctgs[j]&1], grp, hap, (uint32) segs[j]);
+                fprintf(fo, "@%s%c\t%u\t%u\tLG%d.H%d\n", sid, "+-"[rev], beg, end, grp, hap);
             }
         }
         fclose(fo);

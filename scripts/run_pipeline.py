@@ -85,6 +85,9 @@ class Ctx:
     hapscotch_bin: str = "hapscotch"
     hapcure_bin: str = "hapcure"
     yahs_bin: str = "yahs"
+    fastga_bin: str = "FastGA"
+    minibwa_bin: str = "minibwa"
+    samtools_bin: str = "samtools"
 
     @property
     def datadir(self) -> Path:
@@ -182,6 +185,13 @@ def _tail(path: Path, n: int) -> list:
     except OSError:
         return []
 
+
+def _parse_opts(opt_list: list) -> list:
+    """Splits space-delimited option strings into individual command-line arguments."""
+    res = []
+    for opt_str in opt_list:
+        res.extend(shlex.split(opt_str))
+    return res
 
 def require_outputs(outputs) -> None:
     missing = [str(o) for o in outputs if not Path(o).exists()]
@@ -385,9 +395,8 @@ def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn) -> tupl
     def _run():
         ctx.hapcure_dir.mkdir(parents=True, exist_ok=True)
         run_cmd(
-            [ctx.hapcure_bin, "-o", str(ctx.hapcure_dir / "ctg"),
-             str(ctx.idxfile), str(resolved_hicbin_fn())]
-            + args.hapcure_opt,
+            [ctx.hapcure_bin] + _parse_opts(args.hapcure_opt) + ["-o", str(ctx.hapcure_dir / "ctg"),
+             str(ctx.idxfile), str(resolved_hicbin_fn())],
             ctx.logdir / "contig_ec.log",
         )
 
@@ -404,22 +413,15 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
     prefix = ctx.hapscotch_dir / "haps"
     outs = [Path(f"{prefix}.grp.agp"),
             Path(f"{prefix}.grp.txt"),
-            Path(f"{prefix}.cnt.txt"),
+            Path(f"{prefix}.ploidy"),
             ]
 
     def _run():
         ctx.hapscotch_dir.mkdir(parents=True, exist_ok=True)
         opts = []
-        if args.busco:
-            opts += ["-g", str(args.busco)]
+        opts += _parse_opts(args.hapscotch_opt)
         if args.ploidy is not None:
             opts += ["-p", str(args.ploidy)]
-        if args.max_ploidy is not None:
-            opts += ["--max-ploidy", str(args.max_ploidy)]
-        if args.min_ext is not None:
-            opts += ["-B", str(args.min_ext)]
-        if args.min_qual is not None:
-            opts += ["-q", str(args.min_qual)]
         opts += ["-t", str(ctx.threads)]
         agpec = resolved_agpec_fn()
         if agpec is not None:
@@ -429,23 +431,17 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
             opts += ["-c", str(hicbin), "--file-type", "BIN"]
         if run_yahs_fn():
             opts += ["-Y"]
-        opts += args.hapscotch_opt
         run_cmd(
             [ctx.hapscotch_bin] + opts + ["-o", str(prefix), str(ctx.idxfile), str(seqaln_fn())],
             ctx.logdir / "hapscotch.log",
         )
-        ploidy = 0
-        with open(Path(f"{prefix}.grp.txt")) as f:
-            ploidy = max((int(line.split()[2]) for line in f), default=0)
-        with open(Path(f"{prefix}.cnt.txt"), "w") as f:
-            f.write(f"{ploidy}\n")
-
+        
     return Step("hapscotch", lambda: outs, _run)
-
 
 def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
     hap_prefix = ctx.hapscotch_dir / "haps"
-    final_agp = ctx.yahs_dir / "haps.all.agp"
+    yahs_prefix = ctx.yahs_dir / "bbseq"
+    final_agp = f"{yahs_prefix}_scaffolds_final.agp"
 
     def _applicable() -> bool:
         return run_yahs_fn()
@@ -454,10 +450,9 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
         ctx.yahs_dir.mkdir(parents=True, exist_ok=True)
         bbseq_agp = Path(f"{hap_prefix}.bbseq.agp")
         bbscf_agp = Path(f"{hap_prefix}.bbscf.agp")
-        bbpos_txt = Path(f"{hap_prefix}.bbpos.txt")
-        bbscf_hic_bin = Path(f"{hap_prefix}.bbscf-hic.bin")
+        bbscf_hic_bin = Path(f"{hap_prefix}.bbseq-hic.bin")
         seq_hic_bin = resolved_hicbin_fn()
-        for needed in (bbseq_agp, bbscf_agp, bbpos_txt, bbscf_hic_bin, seq_hic_bin):
+        for needed in (bbseq_agp, bbscf_agp, bbscf_hic_bin, seq_hic_bin):
             if not needed.exists():
                 raise PipelineError(
                     f"YaHS branch requested but required hapscotch output missing: {needed}\n"
@@ -466,55 +461,22 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
 
         bbseq_fa = ctx.yahs_dir / "haps.bbseq.fa.gz"
         run_cmd(
-            [ctx.seqtools, "seq", "-a", "-o", str(bbseq_fa), 
+            [ctx.seqtools, "seq", "-t", str(args.threads), "-a", "-o", str(bbseq_fa), 
              str(ctx.seqfile), str(bbseq_agp)],
-             ctx.logdir / "yahs.seqtools_seq.log",
+             ctx.logdir / "yahs.seqtools_bbseq.log",
         )
 
         bbseq_idx = f"{bbseq_fa}.fai" # yahs need .fai not .idx
         run_cmd(
             [ctx.seqtools, "idx", "-o", str(bbseq_idx), str(bbseq_fa)],
-            ctx.logdir / "yahs.seqtools_idx.log",
+            ctx.logdir / "yahs.seqtools_bbidx.log",
         )
 
-        yahs_prefix = ctx.yahs_dir / "haps.bbseq"
         run_cmd(
-            [ctx.yahs_bin, "-a", str(bbscf_agp), "--no-contig-ec", "--no-scaffold-ec",
-             "-o", str(yahs_prefix)] + args.yahs_opt + [str(bbseq_fa), str(bbscf_hic_bin)],
+            [ctx.yahs_bin] + _parse_opts(args.yahs_opt) + 
+            ["-a", str(bbscf_agp), "--no-contig-ec", "--no-scaffold-ec",
+             "-o", str(yahs_prefix), str(bbseq_fa), str(bbscf_hic_bin)],
             ctx.logdir / "yahs.log",
-        )
-        yahs_scaffolds = _find_yahs_scaffolds_agp(yahs_prefix)
-
-        # AGP for all haplotypes
-        run_cmd(
-            [ctx.seqtools, "hap", "-o", str(final_agp), str(yahs_scaffolds), str(bbpos_txt)],
-            ctx.logdir / "yahs.seqtools_haps.log",
-        )
-
-        # AGP for each individual haplotype
-        with open(Path(f"{hap_prefix}.cnt.txt")) as f:
-            ploidy = max((int(line.split()[0]) for line in f), default=0)
-        for hap in range(1, ploidy + 1):
-            hap_agp = ctx.yahs_dir / f"haps.{hap}.agp"
-            run_cmd(
-                [ctx.seqtools, "hap", "-p", str(hap), "-o", str(hap_agp), str(yahs_scaffolds), str(bbpos_txt)],
-                ctx.logdir / f"yahs.seqtools_hap{hap}.log",
-            )
-
-        hic_txt = ctx.yahs_dir / "haps.all.hic.txt"
-        run_cmd(
-            [ctx.hictools, "prepare", "-a", str(final_agp), "-n", "2000",
-             "-o", str(hic_txt)] + args.hictools_prepare_opt
-            + [str(seq_hic_bin), str(ctx.idxfile)],
-            ctx.logdir / "yahs.hictools_prepare.log",
-        )
-
-        hic_png = ctx.yahs_dir / "haps.all.hic.png"
-        hic_pdf = ctx.yahs_dir / "haps.all.hic.pdf"
-        run_cmd(
-            [sys.executable, str(HICMAP_PY), "--png", str(hic_png), "--pdf", str(hic_pdf)]
-            + args.hicmap_opt + [str(hic_txt)],
-            ctx.logdir / "yahs.hicmap.log",
         )
 
     return Step("yahs_scaffold", lambda: [final_agp], _run, applicable=_applicable)
@@ -538,15 +500,20 @@ def _find_yahs_scaffolds_agp(prefix: Path) -> Path:
         f"(tried {', '.join(str(c) for c in candidates)})"
     )
 
-
-def step_collect_results(ctx: Ctx, run_yahs_fn) -> Step:
+def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn) -> Step:
     def _outputs():
-        outs = [ctx.results_dir / "haps.grp.agp", ctx.results_dir / "haps.grp.txt"]
+        outs = [ctx.results_dir / "haps.cnt.txt",
+                ctx.results_dir / "haps.grp.agp", 
+                ctx.results_dir / "haps.grp.txt"]
+        if resolved_agpec_fn():
+            outs += [
+                ctx.results_dir / "haps.ctg-ec.agp",
+            ]
         if run_yahs_fn():
             outs += [
-                ctx.results_dir / "haps.all.agp",
-                ctx.results_dir / "haps.all.hic.png",
-                ctx.results_dir / "haps.all.hic.pdf",
+                ctx.results_dir / "haps-all.scf.agp",
+                ctx.results_dir / "haps-all.scf.hic.png",
+                ctx.results_dir / "haps-all.scf.hic.pdf",
             ]
         return outs
 
@@ -555,25 +522,86 @@ def step_collect_results(ctx: Ctx, run_yahs_fn) -> Step:
         hap_prefix = ctx.hapscotch_dir / "haps"
         shutil.copy(f"{hap_prefix}.grp.agp", ctx.results_dir / "haps.grp.agp")
         shutil.copy(f"{hap_prefix}.grp.txt", ctx.results_dir / "haps.grp.txt")
-        shutil.copy(f"{hap_prefix}.cnt.txt", ctx.results_dir / "haps.cnt.txt")
-        if run_yahs_fn():
-            final_agp = ctx.yahs_dir / "haps.all.agp"
-            shutil.copy(final_agp, ctx.results_dir / "haps.all.agp")
-            shutil.copy(ctx.yahs_dir / "haps.all.hic.png", ctx.results_dir / "haps.all.hic.png")
-            shutil.copy(ctx.yahs_dir / "haps.all.hic.pdf", ctx.results_dir / "haps.all.hic.pdf")
+        shutil.copy(f"{hap_prefix}.ploidy",  ctx.results_dir / "haps.cnt.txt")
 
-            # AGP for each individual haplotype
-            with open(ctx.results_dir / "haps.cnt.txt") as f:
-                ploidy = max((int(line.split()[0]) for line in f), default=0)
+        # ploidy number
+        ploidy = 0
+        with open(ctx.results_dir / "haps.cnt.txt") as f:
+            ploidy = max((int(line.split()[1]) for line in f), default=0)
+
+        # AGP and FASTA of contigs for each individual haplotype
+        grp_file = str(ctx.results_dir / "haps.grp.txt")
+        for hap in range(1, ploidy + 1):
+            hap_agp = ctx.results_dir / f"haps-{hap}.ctg.agp"
+            hap_fa  = ctx.results_dir / f"haps-{hap}.ctg.fa.gz"
+            with open(hap_agp, "w") as out:
+                with open(grp_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("#"):
+                            continue
+                        parts = line.split()
+                        if len(parts) < 6 or int(parts[4]) != hap:
+                            continue
+                        s_id  = parts[0]
+                        s_beg = int(parts[1])
+                        s_end = int(parts[2])
+                        comp_len = s_end - s_beg
+                        agp_line = f"{s_id}_{s_beg+1}_{s_end}\t1\t{comp_len}\t1\tW\t{s_id}\t{s_beg+1}\t{s_end}\t+\n"
+                        out.write(agp_line)
+            run_cmd(
+                [ctx.seqtools, "seq", "-t", str(args.threads), "-a", "-o", str(hap_fa), 
+                 str(ctx.seqfile), str(hap_agp)],
+                 ctx.logdir / f"res.seqtools_ctg_hap{hap}_fa.log",
+            )
+
+        agpec = resolved_agpec_fn()
+        if agpec is not None:
+            shutil.copy(str(agpec),  ctx.results_dir / "haps.ctg-ec.agp")    
+        
+        if run_yahs_fn():
+            yahs_agp = _find_yahs_scaffolds_agp(ctx.yahs_dir / "bbseq")
+            bbpos_txt = ctx.hapscotch_dir / "haps.bbpos.txt"
+            
+            # AGP for all haplotypes
+            scfall_agp = ctx.results_dir / "haps-all.scf.agp"
+            run_cmd(
+                [ctx.seqtools, "hap", "-o", str(scfall_agp), 
+                 str(yahs_agp), str(bbpos_txt)],
+                ctx.logdir / "res.seqtools_scf_all_agp.log",
+            )
+
+            # AGP and FASTA for each individual haplotype
             for hap in range(1, ploidy + 1):
-                hap_agp = ctx.results_dir / f"haps.{hap}.agp"
-                hap_fa  = ctx.results_dir / f"haps.{hap}.fa.gz"
-                shutil.copy(ctx.yahs_dir / f"haps.{hap}.agp", hap_agp)
+                hap_agp = ctx.results_dir / f"haps-{hap}.scf.agp"
+                hap_fa  = ctx.results_dir / f"haps-{hap}.scf.fa.gz"
                 run_cmd(
-                    [ctx.seqtools, "seq", '-a', "-o", str(hap_fa),
-                     str(ctx.seqfile), str(hap_agp)],
-                     ctx.logdir / f"results.seqtools_seq_h{hap}.log",
+                    [ctx.seqtools, "hap", "-p", str(hap), "-o", str(hap_agp), 
+                     str(yahs_agp), str(bbpos_txt)],
+                    ctx.logdir / f"res.seqtools_scf_hap{hap}_agp.log",
                 )
+                run_cmd(
+                    [ctx.seqtools, "seq", "-t", str(args.threads), "-a", "-o", str(hap_fa),
+                     str(ctx.seqfile), str(hap_agp)],
+                    ctx.logdir / f"res.seqtools_scf_hap{hap}_fa.log",
+                )
+
+            # generate hic plots
+            hic_txt = ctx.results_dir / "haps-all.scf.hic.txt"
+            run_cmd(
+                [ctx.hictools, "prepare", "-a", str(scfall_agp), "-n", "3000", "-o", str(hic_txt)] + 
+                [str(resolved_hicbin_fn()), str(ctx.idxfile)],
+                ctx.logdir / "res.hictools_prepare.log",
+            )
+
+            hic_png = ctx.results_dir / "haps-all.scf.hic.png"
+            hic_pdf = ctx.results_dir / "haps-all.scf.hic.pdf"
+            run_cmd(
+                [sys.executable, str(HICMAP_PY), 
+                 "--png", str(hic_png), "--pdf", str(hic_pdf), 
+                 str(hic_txt)],
+                ctx.logdir / "res.hicmap.log",
+            )
 
     return Step("collect_results", _outputs, _run)
 
@@ -588,9 +616,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("seqfile", help="genome sequence file (fasta[.gz]), positional")
 
-    p.add_argument("-o", "--outdir", default=None,
-                    help="output directory [HapScotch_OUT_<YYYYMMDD>]")
+    p.add_argument("-o", "--outdir", default=None, help="output directory [HapScotch_OUT_<YYYYMMDD>]")
+    p.add_argument("-a", "--agp", metavar="AGP", help="existing error-correction AGP")
     p.add_argument("-t", "--threads", type=int, default=8, help="threads [8]")
+    p.add_argument("-p", "--ploidy", type=int, default=0, help="ploidy number [0]")
     p.add_argument("-v", "--verbose", type=int, default=0, help="verbose level [0]")
 
     aln = p.add_argument_group("alignment inputs")
@@ -602,46 +631,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                       help="raw HiC fastq/a file to align via hicaln.py; repeatable")
 
     hs = p.add_argument_group("hapscotch options")
-    hs.add_argument("-g", "--busco", metavar="TSV", help="BUSCO full table")
-    hs.add_argument("-p", "--ploidy", type=int, default=None, help="genome ploidy (0=auto)")
-    hs.add_argument("-B", "--min-ext", type=int, default=None)
-    hs.add_argument("-q", "--min-qual", type=int, default=None)
-    hs.add_argument("--max-ploidy", type=int, default=None)
     hs.add_argument("--hapscotch-opt", action="append", default=[],
-                     help="extra raw option passed through to hapscotch; repeatable ('hapscotch -h' for all options)")
+                     help="options passed through to hapscotch; repeatable ('hapscotch -h' for all options)")
     
     hc = p.add_argument_group("hapcure options")
-    hc.add_argument("-a", "--agp", metavar="AGP",
-                    help="existing error-correction AGP; pass it to hapscotch and skip hapcure")
     hc.add_argument("--no-contig-ec", dest="contig_ec", action="store_false", default=True,
                      help="skip hapcure contig error-correction step")
     hc.add_argument("--hapcure-opt", action="append", default=[],
-                     help="extra raw option passed through to hapcure; repeatable "
-                          "('hapcure -h' for all options)")
+                     help="options passed through to hapcure; repeatable ('hapcure -h' for all options)")
     
     yh = p.add_argument_group("yahs options")
-    yh_grp = yh.add_mutually_exclusive_group()
-    yh_grp.add_argument("--yahs", dest="run_yahs", action="store_true", default=None,
-                         help="force-enable the YaHS branch (errors if no HiC data)")
-    yh_grp.add_argument("--no-yahs", dest="run_yahs", action="store_false",
+    yh.add_argument("--no-yahs", dest="run_yahs", action="store_false", default=True,
                          help="force-disable the YaHS branch even if HiC data is available")
     yh.add_argument("--yahs-opt", action="append", default=[],
-                     help="extra raw option passed through to yahs; repeatable "
-                          "('yahs -h' for all options)")
-    
-    hm = p.add_argument_group("hicmap options")
-    hm.add_argument("--hictools-prepare-opt", action="append", default=[],
-                     help="extra raw option passed through to hictools prepare; repeatable "
-                          "('hictools prepare -h' for all options)")
-    hm.add_argument("--hicmap-opt", action="append", default=[],
-                     help="extra raw option passed through to hicmap.py; repeatable "
-                          "('hicmap.py -h' for all options)")
+                     help="options passed through to yahs; repeatable ('yahs -h' for all options)")
 
     ctl = p.add_argument_group("pipeline control")
     ctl.add_argument("--resume", action="store_true",
-                      help="resume a previous run in OUTDIR: skips already-completed "
-                           "steps and continues from the first incomplete one, "
-                           "without rerunning anything that already succeeded")
+                      help="resume a previous run in OUTDIR: skips already-completed steps")
     ctl.add_argument("--force", action="store_true",
                       help="ignore existing outputs and rerun every step")
     ctl.add_argument("--force-from", metavar="STEP",
@@ -724,7 +731,8 @@ def main(argv=None) -> int:
         seqfile=Path(args.seqfile), outdir=outdir, threads=args.threads, verbose=args.verbose,
         seqtools=args.seqtools_bin, hictools=args.hictools_bin,
         hapscotch_bin=args.hapscotch_bin, hapcure_bin=args.hapcure_bin,
-        yahs_bin=args.yahs_bin,
+        yahs_bin=args.yahs_bin, fastga_bin=args.fastga_bin, minibwa_bin=args.minibwa_bin, 
+        samtools_bin=args.samtools_bin
     )
     ctx.ensure_dirs()
 
@@ -764,15 +772,11 @@ def main(argv=None) -> int:
         if args.run_yahs is False:
             return False
         have_hic = will_have_hic_fn()
-        if args.run_yahs is True and not have_hic:
-            raise PipelineError("--yahs was forced but no HiC data is available "
-                                 "(need --hic-aln/--hic-file)")
-        return bool(args.run_yahs) if args.run_yahs is not None else have_hic
+        return have_hic
 
-    step_hs = step_hapscotch(ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec_fn,
-                              run_yahs_fn)
+    step_hs = step_hapscotch(ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec_fn, run_yahs_fn)
     step_yh = step_yahs_scaffold(ctx, args, resolved_hicbin_fn, run_yahs_fn)
-    step_res = step_collect_results(ctx, run_yahs_fn)
+    step_res = step_collect_results(ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn)
 
     steps = [step_idx, step_sa, step_ha, step_hc, step_ec, step_hs, step_yh, step_res]
 

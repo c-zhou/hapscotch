@@ -139,7 +139,7 @@ int main(int argc, char *argv[])
     ploidy_num = 0;
     min_ext = 50000;
     read_len = 150;
-    min_qual = 1;
+    min_qual = 10;
     dual_aln = 1;
     no_ec = 0;
     n_threads = 1;
@@ -254,7 +254,8 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -h, --help             print this help\n");
         fprintf(fp_help, "    -V, --version          show version number\n");
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Example: ./hapscotch -o hapscotch.out genome.fa.fai aln.paf\n");
+        fprintf(fp_help, "Example: hapscotch -o hapscotch.out genome.fa.fai aln.paf\n");
+        fprintf(fp_help, "         hapscotch -o hapscotch.out -c hic.bam genome.fa.fai aln.paf\n");
         fprintf(fp_help, "\n");
         return fp_help == stdout? 0 : 1;
     }
@@ -293,8 +294,7 @@ int main(int argc, char *argv[])
     hic_bfile = NULL;
     hic_bfile = write_binary_hic_data(hic_file, f_type, dicts_raw, read_len, pref_out);
 
-    ret = match_binary_file_sdict(hic_bfile, dicts_raw);
-    if (ret) {
+    if (hic_bfile && (ret = match_binary_file_sdict(hic_bfile, dicts_raw))) {
         fprintf(stderr, "[E::%s] HiC BIN sequence dictionary does not match genome: %d\n", __func__, ret);
         free(hic_bfile);
         sd_destroy(dicts_raw);
@@ -324,7 +324,7 @@ int main(int argc, char *argv[])
     if (break_dict) {
         validate_break_agp(break_dict);
         dicts = make_piece_sdict(break_dict);
-        fprintf(stderr, "[M::%s] %u sequences broken into %u pieces\n", __func__, dicts_raw->n, dicts->n);
+        //fprintf(stderr, "[M::%s] %u sequences broken into %u pieces\n", __func__, dicts_raw->n, dicts->n);
     }
 
     // read busco gene table
@@ -377,6 +377,7 @@ int main(int argc, char *argv[])
             fprintf(stderr, "[W::%s] please double check the input data or specify ploidy number with option '-p'\n", __func__);
         }
     }
+    write_ploidy_file(ploidy_num, pref_out);
 
     // detect structure variants or misassemblies
     //detect_structural_variants(ovls, novl, dicts, ploidy_num);
@@ -427,17 +428,14 @@ static void contig_error_correction(char *hic_bfile, sdict_t *dicts, char *agp_e
 {
     if (!hic_bfile || !dicts) return;
     
-    asm_dict_t *break_dict;
     ec_pos_t *calls;
     FILE *fo;
     int64 nhic;
     hic_t *hics;
     int ncall;
 
-    break_dict = make_asm_dict_from_sdict(dicts);
     nhic = 0;
-    hics = read_hic_from_binary_sd_conversion(hic_bfile, break_dict, ec_conf.bin_size, 0, &nhic);
-    asm_destroy(break_dict);
+    hics = read_hic_from_binary(hic_bfile, dicts, ec_conf.bin_size, 0, &nhic);
     if (hics == NULL || nhic == 0) {
         fprintf(stderr, "[E::%s] no usable HiC contacts found\n", __func__);
         return;

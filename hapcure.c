@@ -75,7 +75,7 @@ static void print_help(FILE *fo)
     fprintf(fo, "    -h, --help             print this help\n");
     fprintf(fo, "    -V, --version          show version number\n");
     fprintf(fo, "\n");
-    fprintf(fo, "Example: ./hapcure -o hapcure.out genome.fa.fai hic.bam\n");
+    fprintf(fo, "Example: hapcure -o hapcure.out genome.fa.fai hic.bam\n");
     fprintf(fo, "\n");
 }
 
@@ -97,7 +97,6 @@ int main(int argc, char *argv[])
 {
     const char *opt_str = "o:s:f:d:r:p:v:Vh";
     ketopt_t opt = KETOPT_INIT;
-    asm_dict_t *adict;
     sdict_t *dicts;
     hic_t *hics;
     fileType_t f_type;
@@ -173,10 +172,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    adict = make_asm_dict_from_sdict(dicts);
     nhic = 0;
-    hics = read_hic_from_binary_sd_conversion(hic_bfile, adict, ec_conf.bin_size, 0, &nhic);
-    asm_destroy(adict);
+    hics = read_hic_from_binary(hic_bfile, dicts, ec_conf.bin_size, 0, &nhic);
     if (hics == NULL || nhic == 0) {
         fprintf(stderr, "[E::%s] no usable HiC contacts found\n", __func__);
         free(hic_bfile);

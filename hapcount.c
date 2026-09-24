@@ -125,7 +125,7 @@ strerror(errno));
         fprintf(fp_help, "    -h, --help             print this help\n");
         fprintf(fp_help, "    -V, --version          show version number\n");
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Example: ./hapcount -o hapcount.out genome.fa.fai aln.paf\n");
+        fprintf(fp_help, "Example: hapcount -o hapcount.out genome.fa.fai aln.paf\n");
         fprintf(fp_help, "\n");
         return fp_help == stdout? 0 : 1;
     }
@@ -156,7 +156,7 @@ strerror(errno));
         }
         validate_break_agp(break_dict);
         dicts = make_piece_sdict(break_dict);
-        fprintf(stderr, "[M::%s] %u sequences broken into %u pieces by AGP file %s\n", __func__, dicts_raw->n, dicts->n, agp_file);
+       // fprintf(stderr, "[M::%s] %u sequences broken into %u pieces by AGP file %s\n", __func__, dicts_raw->n, dicts->n, agp_file);
     }
 
     // read busco gene table
@@ -193,7 +193,7 @@ strerror(errno));
         fprintf(stderr, "[W::%s] the estimated ploidy number (%d) is odd\n", __func__, ploidy_num);
 
     // write output
-    fprintf(stdout, "Estimated_ploidy\t%d\n", ploidy_num);
+    fprintf(stdout, "Ploidy\t%d\n", ploidy_num);
     
     free(ovls);
     sd_destroy(dicts);

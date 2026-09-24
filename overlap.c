@@ -1404,6 +1404,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
 
     // find the maximum bounding box of the merged chains
     score = 0;
+    j = 0;
     for (i = 0; i < nalnb; i++) {
         if (alnbs[i].alen + alnbs[i].blen > score) {
             score = alnbs[i].alen + alnbs[i].blen;

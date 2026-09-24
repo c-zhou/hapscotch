@@ -574,6 +574,8 @@ static int hiclink_file_from_bed(char *f, char *agp, char *fai, uint8 mq, int sc
         exit(EXIT_FAILURE);
     }
 
+    s0 = s1 = e0 = e1 = i0 = i1 = 0;
+    p0 = p1 = 0;
     rec_c = pair_c = 0;
     buff = 0;
     while ((line = iostream_getline(fp)) != NULL) {

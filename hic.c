@@ -128,6 +128,7 @@ static void dump_links_from_bam_file(const char *f, sdict_t *dict, const char *o
     ks_resize(rname0, 256);
     ks_resize(rname1, 256);
     cname0 = cname1 = 0;
+    q0 = q1 = 255;
     rec_c = pair_c = inter_c = intra_c = 0;
     buff = 0;
     b = bam_init1();
@@ -290,6 +291,7 @@ static void dump_links_from_bed_file(const char *f, sdict_t *dict, const char *o
     dbuff = bbuff;
     ebuff = bbuff + (1<<20);
 
+    q0 = q1 = 255;
     rec_c = pair_c = inter_c = intra_c = 0;
     buff = 0;
     
@@ -1042,14 +1044,14 @@ void write_binary_hic_data_pseudo_yahs(char *bf, sdict_t *dicts, asm_dict_t *bre
     fclose(fo);
 }
 
-hic_t *read_hic_from_binary(char *hic_bfile, sdict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic)
+static hic_t *read_hic_from_binary_alnhbin(char *hic_bfile, sdict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic)
 {
     if (_nhic) *_nhic = 0;
     if (hic_bfile == NULL)
         return NULL;
 
     uint32 i0, i1, s0, s1, e0, e1;
-    uint64 i, j, m, n, pair_n, pair_c, max_n, n_recs;
+    uint64 m, n, pair_n, pair_c, max_n, n_recs;
     int64 magic_number;
     uint8 *bbuff, *ebuff, *buffer;
     FILE *fp;
@@ -1087,6 +1089,9 @@ hic_t *read_hic_from_binary(char *hic_bfile, sdict_t *dicts, int bin_size, uint8
         m = fread(buffer, sizeof(uint8) * ALNHBIN_ENTRY_SIZE, FREAD_BUFF_SIZE, fp);
         for (bbuff = buffer, ebuff = buffer + m * ALNHBIN_ENTRY_SIZE; 
             bbuff < ebuff && pair_c++ < pair_n; bbuff += ALNHBIN_ENTRY_SIZE) {
+            if (pair_c % REPORT_EPOC == 0)
+                fprintf(stderr, "[M::%s] %llu million records processed\n", __func__, pair_c / 1000000);
+            
             if (bbuff[ALNHBIN_ENTRY_SIZE-1] < min_qual)
                 continue;
             memcpy(&i0, bbuff,  sizeof(uint32));
@@ -1131,98 +1136,131 @@ hic_t *read_hic_from_binary(char *hic_bfile, sdict_t *dicts, int bin_size, uint8
         free(hics);
         return NULL;
     }
-
-    // add symmetric links
-    for (i = 0, m = n; i < m; i++) {
-        if (hics[i].aseq == hics[i].bseq)
-            continue;
-        if (n == max_n) {
-            max_n <<= 1;
-            MYREALLOC(hics, max_n);
-            if (hics == NULL)
-                mem_alloc_error("hic array");
-        }
-        hics[n++] = (hic_t){hics[i].bseq, hics[i].bpos, hics[i].aseq, hics[i].apos, hics[i].nhic};
-    }
-    qsort(hics, n, sizeof(hic_t), hic_cmpfunc);
-
     MYREALLOC(hics, n);
-    
-    // some statistics for hic links
-    int64 slen, all_w, cov_w, inter_w, intra_w;
-    int64 inter_c, intra_c, total_c;
-    uint8 *wmark;
-    int w, s;
-
-    slen = 0;
-    all_w = 0;
-    max_n = 1;
-    for (i = 0; i < dicts->n; i++) {
-        w = dicts->s[i].len;
-        slen += w;
-        w = (w - 1) / bin_size + 1;
-        all_w += w;
-        max_n = MAX(max_n, w);
-    }
-    // number of windows
-    MYCALLOC(wmark, max_n);
-    if (wmark == NULL)
-        mem_alloc_error("mark array");
-    
-    inter_c = intra_c = 0;
-    inter_w = intra_w = 0;
-    cov_w = 0;
-    s = hics[0].aseq;
-    for (i = 0; i <= n; i++) {
-        if (i == n || hics[i].aseq != s) {
-            m = (dicts->s[s].len - 1) / bin_size + 1;
-            for (j = 0; j < m; j++) {
-                if (wmark[j])
-                    cov_w++;
-                if (wmark[j] & 0x1)
-                    intra_w++;
-                if (wmark[j] & 0x2)
-                    inter_w++;
-            }
-            if (i == n) break;
-            s = hics[i].aseq;
-            MYBZERO(wmark, max_n);
-        }
-        if (hics[i].bseq == s) {
-            intra_c += hics[i].nhic;
-            wmark[hics[i].apos] |= 0x1;
-            wmark[hics[i].bpos] |= 0x1;
-        } else {
-            inter_c += hics[i].nhic;
-            wmark[hics[i].apos] |= 0x2;
-        }
-    }
-    inter_c /= 2; // each inter link is counted twice
-    total_c = inter_c + intra_c;
-
-    fprintf(stderr, "[M::%s] HiC links summary statistics\n", __func__);
-    fprintf(stderr, "[M::%s] total sequence: %12lld\n", __func__, slen);
-    fprintf(stderr, "[M::%s]    window size: %12d\n", __func__, bin_size);
-    fprintf(stderr, "[M::%s]    no. windows: %12lld\n", __func__, all_w);
-    fprintf(stderr, "[M::%s] hic link counts\n", __func__);
-    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, total_c);
-    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, intra_c);
-    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_c);
-    fprintf(stderr, "[M::%s] sequence window\n", __func__);
-    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, cov_w);
-    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, intra_w);
-    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_w);
-    fprintf(stderr, "[M::%s] links per window\n", __func__);
-    fprintf(stderr, "[M::%s]        - total: %12.3e\n", __func__, (double) total_c/cov_w);
-    fprintf(stderr, "[M::%s]        - intra: %12.3e\n", __func__, (double) intra_c/cov_w);
-    fprintf(stderr, "[M::%s]        - inter: %12.3e\n", __func__, (double) inter_c/cov_w);
-    fprintf(stderr, "[M::%s] links per base: %12.3e\n", __func__, (double) total_c/slen);
-
-    free(wmark);
 
     if (_nhic) *_nhic = n;
 
     return hics;
+}
+
+static hic_t *read_hic_from_binary_yahsbin(char *hic_bfile, sdict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic)
+{
+    if (_nhic) *_nhic = 0;
+    if (hic_bfile == NULL)
+        return NULL;
+
+    uint32 i0, i1, s0, s1;
+    uint64 m, n, pair_n, pair_c, max_n, n_recs;
+    int64 magic_number;
+    uint8 *bbuff, *ebuff, *buffer;
+    FILE *fp;
+    hic_t *hics;
+
+    fp = fopen(hic_bfile, "r");
+    if (fp == NULL)
+        return NULL;
+
+    m = fread(&magic_number, sizeof(int64), 1, fp);
+    if (m != 1) bin_fread_error();
+    if (!is_valid_yahs_bin_header(magic_number)) {
+        fprintf(stderr, "[E::%s] not a valid BIN file\n", __func__);
+        return NULL;
+    }
+    binary_fseek_skip_sdict(fp);
+    m = fread(&pair_n, sizeof(uint64), 1, fp);
+    if (m != 1) bin_fread_error();
+    
+    MYMALLOC(buffer, YAHSBIN_ENTRY_SIZE * FREAD_BUFF_SIZE);
+    if (buffer == NULL)
+        mem_alloc_error("buffer array");
+
+    max_n = 0x4000000ULL; // 64MB - ~ 1GB mem for hic_t array
+    if (max_n > pair_n)
+        max_n = pair_n;
+    MYMALLOC(hics, max_n);
+    if (hics == NULL)
+        mem_alloc_error("hic array");
+
+    pair_c = 0;
+    n_recs = 0;
+    n = 0;
+    while (pair_c < pair_n) {
+        m = fread(buffer, sizeof(uint8) * YAHSBIN_ENTRY_SIZE, FREAD_BUFF_SIZE, fp);
+        for (bbuff = buffer, ebuff = buffer + m * YAHSBIN_ENTRY_SIZE; 
+            bbuff < ebuff && pair_c++ < pair_n; bbuff += YAHSBIN_ENTRY_SIZE) {
+            if (pair_c % REPORT_EPOC == 0)
+                fprintf(stderr, "[M::%s] %llu million records processed\n", __func__, pair_c / 1000000);
+            
+            if (bbuff[YAHSBIN_ENTRY_SIZE-1] < min_qual)
+                continue;
+            memcpy(&i0, bbuff,  sizeof(uint32));
+            memcpy(&s0, bbuff + sizeof(uint32)*1, sizeof(uint32));
+            memcpy(&i1, bbuff + sizeof(uint32)*2, sizeof(uint32));
+            memcpy(&s1, bbuff + sizeof(uint32)*3, sizeof(uint32));
+            
+            s0 /= bin_size;
+            s1 /= bin_size;
+
+            if (i0 == i1 && s0 > s1) SWAP(uint32, s0, s1);
+
+            hics[n++] = (hic_t){i0, s0, i1, s1, 1};
+            if (n == max_n) {
+                n = hic_sort_merge(hics, n);
+                if (n > (max_n>>1)) {
+                    max_n <<= 1;
+                    MYREALLOC(hics, max_n);
+                    if (hics == NULL)
+                        mem_alloc_error("hic array");
+                }
+            }
+            n_recs++;
+        }
+    }
+    
+    n = hic_sort_merge(hics, n);
+    
+    fprintf(stderr, "[M::%s] processed %llu read pairs\n", __func__, pair_c);
+    fprintf(stderr, "[M::%s] retained %llu records\n", __func__, n_recs);
+    fprintf(stderr, "[M::%s] linked %llu sequence regions\n", __func__, n);
+    
+    free(buffer);
+    fclose(fp);
+
+    if (n == 0) {
+        free(hics);
+        return NULL;
+    }
+    MYREALLOC(hics, n);
+
+    if (_nhic) *_nhic = n;
+
+    return hics;
+}
+
+hic_t *read_hic_from_binary(char *hic_bfile, sdict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic)
+{
+    if (_nhic) *_nhic = 0;
+    if (hic_bfile == NULL)
+        return NULL;
+
+    FILE *fp;
+    int64 magic_number;
+    
+    fp = fopen(hic_bfile, "r");
+    if (fp == NULL)
+        return NULL;
+    if (fread(&magic_number, sizeof(int64), 1, fp) != 1)
+        bin_fread_error();
+    fclose(fp);
+
+    if (is_valid_alnh_bin_header(magic_number))
+        return read_hic_from_binary_alnhbin(hic_bfile, dicts, bin_size, min_qual, _nhic);
+    else if (is_valid_yahs_bin_header(magic_number))
+        return read_hic_from_binary_yahsbin(hic_bfile, dicts, bin_size, min_qual, _nhic);
+    else
+        fprintf(stderr, "[E::%s] not a valid BIN file\n", __func__);
+    
+    return NULL;
 }
 
 static hic_t *read_hic_from_binary_sd_conversion_alnhbin(char *hic_bfile, asm_dict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic)

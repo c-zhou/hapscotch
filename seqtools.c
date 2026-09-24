@@ -50,7 +50,7 @@ int VERBOSE = 0;
 int LONG_HELP = 0;
 
 static AGP_CT_t LG_AGP_SEQ_COMPONENT_TYPE = AGP_CT_W;
-static AGP_CT_t LG_AGP_GAP_COMPONENT_TYPE = AGP_CT_N;
+static AGP_CT_t LG_AGP_GAP_COMPONENT_TYPE = AGP_CT_U;
 static AGP_LE_t LG_AGP_LINKAGE_EVIDENCE = AGP_LE_ALIGN_GENUS;
 static int LG_AGP_GAP_SIZE = DEFAULT_AGP_U_GAP_SIZE;
 
@@ -76,7 +76,7 @@ static inline void write_agp_gap(FILE *fo, char *s_name, uint64 s_beg, uint64 s_
 
 typedef struct {
     char *name;
-    uint32 len:31, rev:1;
+    uint32 beg, end, rev;
     int g, h;
     int64 pos;
 } seq_t;
@@ -136,23 +136,25 @@ static void annot_haps_from_agp(char *agp, char *ann, int hap, FILE *fo)
     line  = NULL;
     lline = 0;
     while (getline(&line, &lline, fp) > 0) {
-        // fields: [0] name  [1] len  [2] ori  [3] grp_id  [4] hap  [5] pos
+        // fields: [0] name  [1] beg [2] end  [3] ori  [4] grp_id  [5] hap  [6] pos
         nf = parse_line(line, f, 10);
-        if (nf < 6) {
+        if (nf < 7) {
             // reconstruct the line to show the invalid fields
             for (i = 0; i < nf; i++)
                 line[strlen(f[i])] = '\t';
             fprintf(stderr, "[W::%s] invalid annotation line: %s\n", __func__, line);
             continue;
         }
-        if (hap >= 0 && atoi(f[4]) != hap) continue;
+        if (hap >= 0 && atoi(f[5]) != hap)
+            continue;
         kv_pushp(seq_t, vseqs, &seq);
         seq->name = strdup(f[0]);
-        seq->len  = atoi(f[1]);
-        seq->rev  = (f[2][0] == '-') ? 1 : 0;
-        seq->g    = atoi(f[3]);
-        seq->h    = atoi(f[4]);
-        seq->pos  = atoll(f[5]);
+        seq->beg  = atoll(f[1]);
+        seq->end  = atoll(f[2]);
+        seq->rev  = (f[3][0] == '-');
+        seq->g    = atoi(f[4]);
+        seq->h    = atoi(f[5]);
+        seq->pos  = atoll(f[6]);
     }
     fclose(fp);
 
@@ -273,9 +275,9 @@ static void annot_haps_from_agp(char *agp, char *ann, int hap, FILE *fo)
                         write_agp_gap(fo, ks->s, scf_pos, scf_pos + LG_AGP_GAP_SIZE - 1, ++part_no);
                         scf_pos += LG_AGP_GAP_SIZE;
                     }
-                    seq_len = seqs[a].len;
+                    seq_len = seqs[a].end - seqs[a].beg;
                     write_agp_seq(fo, ks->s, scf_pos, scf_pos + seq_len - 1, ++part_no, 
-                        seqs[a].name, 1, seq_len, r ^ seqs[a].rev);
+                        seqs[a].name, seqs[a].beg + 1, seqs[a].end, r ^ seqs[a].rev);
                     scf_pos += seq_len;
                     add_gap  = 1;
                 }
@@ -300,19 +302,20 @@ static void print_help_hap(FILE *fp_help)
     fprintf(fp_help, "\n");
     fprintf(fp_help, "Usage: seqtools hap [options] <input.agp> <annot.txt>\n");
     fprintf(fp_help, "Options:\n");
-    fprintf(fp_help, "    -p INT            print p-th haplotype only\n");
-    fprintf(fp_help, "    -o STR            output to file [stdout]\n");
+    fprintf(fp_help, "    -p INT              print p-th haplotype only\n");
+    fprintf(fp_help, "    -o STR              output to file [stdout]\n");
     if (LONG_HELP) {
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "    --seq-ctype  STR  AGP output sequence component type [%s]\n", agp_component_type_val(LG_AGP_SEQ_COMPONENT_TYPE));
-        fprintf(fp_help, "    --gap-ctype  STR  AGP output gap component type [%s]\n", agp_component_type_val(LG_AGP_GAP_COMPONENT_TYPE));
-        fprintf(fp_help, "    --gap-link   STR  AGP output gap linkage evidence [%s]\n", agp_linkage_evidence_val(LG_AGP_LINKAGE_EVIDENCE));
-        fprintf(fp_help, "    --gap-size   INT  AGP output gap size between sequence component [%d]\n", LG_AGP_GAP_SIZE);
+        fprintf(fp_help, "    AGP options:\n");
+        fprintf(fp_help, "      --seq-ctype  STR  AGP output sequence component type [%s]\n", agp_component_type_val(LG_AGP_SEQ_COMPONENT_TYPE));
+        fprintf(fp_help, "      --gap-ctype  STR  AGP output gap component type [%s]\n", agp_component_type_val(LG_AGP_GAP_COMPONENT_TYPE));
+        fprintf(fp_help, "      --gap-link   STR  AGP output gap linkage evidence [%s]\n", agp_linkage_evidence_val(LG_AGP_LINKAGE_EVIDENCE));
+        fprintf(fp_help, "      --gap-size   INT  AGP output gap size between sequence component [%d]\n", LG_AGP_GAP_SIZE);
         fprintf(fp_help, "\n");
     }
-    fprintf(fp_help, "    -?                print long help with extra option list\n");
-    fprintf(fp_help, "    -h, --help        print this help\n");
-    fprintf(fp_help, "    -V, --version     show version number\n");
+    fprintf(fp_help, "    -?                  print long help with extra option list\n");
+    fprintf(fp_help, "    -h, --help          print this help\n");
+    fprintf(fp_help, "    -V, --version       show version number\n");
     fprintf(fp_help, "\n");
     fprintf(fp_help, "Example: seqtools hap -o haps.agp scaffolds.agp annot.txt\n");
     fprintf(fp_help, "         seqtools hap -p 1 -o hap1.agp scaffolds.agp annot.txt\n");
@@ -577,13 +580,14 @@ static void print_help_seq(FILE *fp_help)
     fprintf(fp_help, "\n");
     fprintf(fp_help, "Usage: seqtools seq [options] <input.fa> <input[.agp]>\n");
     fprintf(fp_help, "Options:\n");
-    fprintf(fp_help, "    -l INT            line width [60]\n");
-    fprintf(fp_help, "    -a                input is in AGP format\n");
-    fprintf(fp_help, "    -u                allow U-type AGP sequence components\n");
-    fprintf(fp_help, "    -z                output in BGZF compressed format\n");
-    fprintf(fp_help, "    -o STR            output to file [stdout]\n");
-    fprintf(fp_help, "    -h, --help        print this help\n");
-    fprintf(fp_help, "    -V, --version     show version number\n");
+    fprintf(fp_help, "    -l INT              line width [60]\n");
+    fprintf(fp_help, "    -a                  input is in AGP format\n");
+    fprintf(fp_help, "    -u                  allow U-type AGP sequence components\n");
+    fprintf(fp_help, "    -z                  output in BGZF compressed format\n");
+    fprintf(fp_help, "    -t INT              number of threads for compression [1]\n");
+    fprintf(fp_help, "    -o STR              output to file [stdout]\n");
+    fprintf(fp_help, "    -h, --help          print this help\n");
+    fprintf(fp_help, "    -V, --version       show version number\n");
     fprintf(fp_help, "\n");
     fprintf(fp_help, "Example: seqtools seq -o output.fa -a input.fa.gz scaffolds.agp\n");
     fprintf(fp_help, "         seqtools seq -o output.fa input.fa.gz seqs.list\n");
@@ -607,15 +611,16 @@ int main_seq(int argc, char *argv[])
     at_realtime0 = realtime();
 
     char *fa, *in, *out;
-    int line_wd, agp_input, allow_unknown_oris, bgzf_output;
+    int line_wd, agp_input, n_threads, allow_unknown_oris, bgzf_output;
     
-    const char *opt_str = "azo:ul:Vh";
+    const char *opt_str = "azt:o:ul:Vh";
     ketopt_t opt = KETOPT_INIT;
     int c;
     FILE *fo, *fp_help = stderr;
     fa = in = out = 0;
     line_wd = 60;
     agp_input = 0;
+    n_threads = 1;
     allow_unknown_oris = 0;
     bgzf_output = 0;
 
@@ -631,6 +636,8 @@ int main_seq(int argc, char *argv[])
                 out = opt.arg;
         } else if (c == 'z') {
             bgzf_output = 1;
+        } else if (c == 't') {
+            n_threads = atoi(opt.arg);
         } else if (c == 'h') {
             fp_help = stdout;
         } else if (c == 'V') {
@@ -656,6 +663,8 @@ int main_seq(int argc, char *argv[])
         return 1;
     }
 
+    if (n_threads < 1) n_threads = 1;
+
     fa = argv[opt.ind];
     in = argv[opt.ind + 1];
 
@@ -679,7 +688,7 @@ int main_seq(int argc, char *argv[])
         if (outf != out) free(outf);
     }
 
-    fo = bgzf_output? bgzf_fopen_write(stdout) : stdout;
+    fo = bgzf_output? bgzf_fopen_write_mt(stdout, n_threads) : stdout;
     if (!fo) {
         fprintf(stderr, "[E::%s] failed to open output stream\n", __func__);
         return 1;
@@ -790,9 +799,9 @@ static void print_help_idx(FILE *fp_help)
     fprintf(fp_help, "\n");
     fprintf(fp_help, "Usage: seqtools idx [options] <input.fa>\n");
     fprintf(fp_help, "Options:\n");
-    fprintf(fp_help, "    -o STR            output to file [stdout]\n");
-    fprintf(fp_help, "    -h, --help        print this help\n");
-    fprintf(fp_help, "    -V, --version     show version number\n");
+    fprintf(fp_help, "    -o STR              output to file [stdout]\n");
+    fprintf(fp_help, "    -h, --help          print this help\n");
+    fprintf(fp_help, "    -V, --version       show version number\n");
     fprintf(fp_help, "\n");
     fprintf(fp_help, "Example: seqtools idx -o input.fa.idx input.fa.gz\n");
     fprintf(fp_help, "\n");

@@ -405,12 +405,14 @@ ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall)
         qsort(call, ncall, sizeof(ec_pos_t), ec_pval_cmpfunc);
         p_thresh = ec_conf.p_thresh / ncall;
         for (i = ncall - 1; i >= 0; i--)
-        if (call[i].pval <= (double) (i + 1) * p_thresh)
-            break;
-        p_thresh = call[i].pval;
+            if (call[i].pval <= (double) (i + 1) * p_thresh)
+                break;
         ncall = i + 1;
-        // sort back by sequence and position
-        qsort(call, ncall, sizeof(ec_pos_t), ec_pos_cmpfunc);
+        if (ncall) {
+            p_thresh = call[i].pval;
+            // sort back by sequence and position
+            qsort(call, ncall, sizeof(ec_pos_t), ec_pos_cmpfunc);
+        }
         // some summary statistics
         fprintf(stderr, "[M::%s] maximum p-value: %.3e\n", __func__, ec_conf.p_thresh);
         fprintf(stderr, "[M::%s] BH adjusted p-value: %.3e\n", __func__, p_thresh);

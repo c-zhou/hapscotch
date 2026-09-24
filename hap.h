@@ -68,6 +68,7 @@ scf_t *build_pseudo_scaffolds(ovl_t *ovls, int64 novl, sdict_t *dicts, asm_dict_
     char *out_pref, int64 *_nscf);
 
 void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_dict, const uint8 opts_out, const char *pref_out);
+void write_ploidy_file(int ploidy_num, char *pref_out);
 
 #ifdef __cplusplus
 }

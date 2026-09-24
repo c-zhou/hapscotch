@@ -51,7 +51,7 @@
 #include "hap.h"
 
 static AGP_CT_t LG_AGP_SEQ_COMPONENT_TYPE = AGP_CT_W;
-static AGP_CT_t LG_AGP_GAP_COMPONENT_TYPE = AGP_CT_N;
+static AGP_CT_t LG_AGP_GAP_COMPONENT_TYPE = AGP_CT_U;
 static AGP_LE_t LG_AGP_LINKAGE_EVIDENCE = AGP_LE_ALIGN_GENUS;
 static int LG_AGP_GAP_SIZE = DEFAULT_AGP_U_GAP_SIZE;
 
@@ -736,6 +736,103 @@ static void test_hic_linkage_map(hlk_t *hlks, int64 nhlk, ovl_t *ovls, int64 nov
     free(hords);
 }
 
+static void hic_linkage_stats(hic_t *hics, int64 nhic, sdict_t *dicts, int bin_size)
+{
+    // some statistics for hic links
+    int64 slen, all_w, cov_w, inter_w, intra_w;
+    int64 inter_c, intra_c, total_c;
+    uint8 *wmark;
+    int i, j, m, w, s, nseq, max_n;
+
+    nseq = dicts->n;
+    slen = 0;
+    all_w = 0;
+    max_n = 1;
+    for (i = 0; i < nseq; i++) {
+        w = dicts->s[i].len;
+        slen += w;
+        w = (w - 1) / bin_size + 1;
+        all_w += w;
+        max_n = MAX(max_n, w);
+    }
+    // number of windows
+    MYCALLOC(wmark, max_n);
+    if (wmark == NULL)
+        mem_alloc_error("mark array");
+    
+    inter_c = intra_c = 0;
+    inter_w = intra_w = 0;
+    cov_w = 0;
+    s = hics[0].aseq;
+    for (i = 0; i <= nhic; i++) {
+        if (i == nhic || hics[i].aseq != s) {
+            m = (dicts->s[s].len - 1) / bin_size + 1;
+            for (j = 0; j < m; j++) {
+                if (wmark[j])
+                    cov_w++;
+                if (wmark[j] & 0x1)
+                    intra_w++;
+                if (wmark[j] & 0x2)
+                    inter_w++;
+            }
+            if (i == nhic) break;
+            s = hics[i].aseq;
+            MYBZERO(wmark, max_n);
+        }
+        if (hics[i].bseq == s) {
+            intra_c += hics[i].nhic;
+            wmark[hics[i].apos] |= 0x1;
+            wmark[hics[i].bpos] |= 0x1;
+        } else {
+            inter_c += hics[i].nhic;
+            wmark[hics[i].apos] |= 0x2;
+        }
+    }
+    inter_c /= 2; // each inter link is counted twice
+    total_c = inter_c + intra_c;
+
+    fprintf(stderr, "[M::%s] HiC links summary statistics\n", __func__);
+    fprintf(stderr, "[M::%s] total sequence: %12lld\n", __func__, slen);
+    fprintf(stderr, "[M::%s]    window size: %12d\n", __func__, bin_size);
+    fprintf(stderr, "[M::%s]    no. windows: %12lld\n", __func__, all_w);
+    fprintf(stderr, "[M::%s] hic link counts\n", __func__);
+    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, total_c);
+    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, intra_c);
+    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_c);
+    fprintf(stderr, "[M::%s] sequence window\n", __func__);
+    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, cov_w);
+    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, intra_w);
+    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_w);
+    fprintf(stderr, "[M::%s] links per window\n", __func__);
+    fprintf(stderr, "[M::%s]        - total: %12.3e\n", __func__, (double) total_c/cov_w);
+    fprintf(stderr, "[M::%s]        - intra: %12.3e\n", __func__, (double) intra_c/cov_w);
+    fprintf(stderr, "[M::%s]        - inter: %12.3e\n", __func__, (double) inter_c/cov_w);
+    fprintf(stderr, "[M::%s] links per base: %12.3e\n", __func__, (double) total_c/slen);
+
+    free(wmark);
+}
+
+static hic_t *add_symmetric_hic_links(hic_t *hics, int64 *_nhic) 
+{
+    int64 i, mhic, nhic;
+    
+    mhic = nhic = *_nhic;
+    for (i = 0; i < nhic; i++)
+        mhic += (hics[i].aseq != hics[i].bseq);
+    MYREALLOC(hics, mhic);
+    if (hics == NULL)
+        mem_alloc_error("HiC links array");
+    mhic = nhic;
+    for (i = 0; i < mhic; i++)
+        if (hics[i].aseq != hics[i].bseq)
+            hics[nhic++] = (hic_t){hics[i].bseq, hics[i].bpos, hics[i].aseq, hics[i].apos, hics[i].nhic};
+    // sort the HiC links
+    qsort(hics, nhic, sizeof(hic_t), hic_link_cmpfunc);
+
+    *_nhic = nhic;
+    return hics;
+}
+
 static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t *dicts, asm_dict_t *break_dict, ovl_t *ovls, int64 novl, int64 *_nhlk)
 {
     if (_nhlk) *_nhlk = 0;
@@ -778,19 +875,10 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     hics = break_dict?
         read_hic_from_binary_sd_conversion((char *) hic_bfile, break_dict, HIC_NORM_WINDOW, min_qual, &nhic) :
         read_hic_from_binary((char *) hic_bfile, dicts, HIC_NORM_WINDOW, min_qual, &nhic);
-    if (break_dict && hics && nhic > 0) {
-        // the sd_conversion reader returns upper-triangle links only
-        // add symmetric links to match read_hic_from_binary
-        int64 m = nhic;
-        MYREALLOC(hics, m * 2);
-        if (hics == NULL)
-            mem_alloc_error("HiC links array");
-        for (i = 0; i < m; i++)
-            if (hics[i].aseq != hics[i].bseq)
-                hics[nhic++] = (hic_t){hics[i].bseq, hics[i].bpos, hics[i].aseq, hics[i].apos, hics[i].nhic};
-        MYREALLOC(hics, nhic);
-        qsort(hics, nhic, sizeof(hic_t), hic_link_cmpfunc);
-    }
+    // make the HiC links symmetric
+    hics = add_symmetric_hic_links(hics, &nhic);
+    // some basic statistics
+    hic_linkage_stats(hics, nhic, dicts, HIC_NORM_WINDOW);
 #endif
 
     if (hics == NULL || nhic == 0) {
@@ -2077,6 +2165,7 @@ static int merge_coverage(cov_point_t *acovs, int nacov, cov_point_t *bcovs, int
     acov = bcov = 0;
     ai = bi = 0;
     ncov = 0;
+    prev_cov = 0;
     has_prev = 0;
     while (ai < nacov || bi < nbcov) {
         apos = ai < nacov? acovs[ai].pos : INT32_MAX;
@@ -2517,7 +2606,7 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
 
     kvec_t(scf_block_t) blks;
     scf_block_t *blk;
-    ovl_t *ovl;
+    ovl_t *ovl, *ob, *oe;
     range_t *rngs;
     cov_point_t **covs, *cov;
     ord_i64_t *sords, *qords;
@@ -2637,6 +2726,18 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
                     ovl->aepos - ovl->abpos < min_ext ||
                     ovl->bepos - ovl->bbpos < min_ext)
                     continue;
+                ob = ovls + (index[b] >> 32);
+                oe = ob + (uint32) index[b];
+                ext = 1;
+                for (; ob < oe; ob++)
+                    if (!ob->del && 
+                        ob->bread != (a>>1) &&
+                        abs(grps[ob->bread]) == ngrp &&
+                        ob->aepos - ob->abpos >= min_ext) {
+                        ext = 0;
+                        break;
+                    }
+                if (!ext) continue; // it somehow overlapped with an existing backbone extension
                 if (ovl->brev) {
                     beg = 0;
                     end = ovl->bbpos;
@@ -2743,6 +2844,18 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
                     ovl->aepos - ovl->abpos < min_ext ||
                     ovl->bepos - ovl->bbpos < min_ext)
                     continue;
+                ob = ovls + (index[b] >> 32);
+                oe = ob + (uint32) index[b];
+                ext = 1;
+                for (; ob < oe; ob++)
+                    if (!ob->del && 
+                        ob->bread != (a>>1) &&
+                        abs(grps[ob->bread]) == ngrp &&
+                        ob->aepos - ob->abpos >= min_ext) {
+                        ext = 0;
+                        break;
+                    }
+                if (!ext) continue; // it somehow overlapped with an existing backbone extension
                 if (ovl->brev) {
                     beg = 0;
                     end = ovl->bbpos;
@@ -3071,7 +3184,7 @@ add_block:
                         l_scaled = 0.;
                         for (k = j; k < i; k++) {
                             ovl = govls[k].o;
-                            if ((ovl->arev == ovl->brev) == (grps[ovl->aread] > 0) == (grps[ovl->bread] > 0))
+                            if ((ovl->arev == ovl->brev) == ((grps[ovl->aread] > 0) == (grps[ovl->bread] > 0)))
                                 // support same orientation
                                 l_scaled += 0.5 * (ovl->alen + ovl->blen) * ovl->qual;
                             else
@@ -3104,9 +3217,9 @@ add_block:
             MYCALLOC(in_tree, ngrp);
             for (i = 0; i < ngrp; i++) {
                 prim_s[i] = -1;
-                primw[i]    = -1.0;
-                pathw[i]    = -1.0;
-                label[i]    = -1;
+                primw[i]  = -1.0;
+                pathw[i]  = -1.0;
+                label[i]  = -1;
             }
             n_in_tree = 0;
             while (n_in_tree < ngrp) {
@@ -3139,9 +3252,9 @@ add_block:
                     gb = edge->g;
                     if (in_tree[gb]) continue;
                     if (edge->w > primw[gb]) {
-                        primw[gb]    = edge->w;
+                        primw[gb]  = edge->w;
                         prim_s[gb] = cur;
-                        prim_r[gb]    = edge->r;
+                        prim_r[gb] = edge->r;
                     }
                 }
             }
@@ -11084,9 +11197,8 @@ static void build_haplotype_partition_hybrid(ovl_t *ovls, int64 novl, hlk_t *hlk
     cft_t *cfts;
     ovl_t *ovl;
     uint64 *index;
-    uint32 a;
-    int64 i, j, nseq, ncft, intra_ovls, inter_ovls;
-    double minhv, intra_hlks, inter_hlks;
+    int64 i, nseq, intra_ovls, inter_ovls;
+    double intra_hlks, inter_hlks;
     int *dels, *reps;
     
     // sequence number
@@ -11124,109 +11236,7 @@ static void build_haplotype_partition_hybrid(ovl_t *ovls, int64 novl, hlk_t *hlk
     fprintf(stderr, "[M::%s] initial greedy haplotype partition\n", __func__);
     fprintf(stderr, "[M::%s] intra_hlks: %16.2f inter_hlks: %16.2f\n", __func__, intra_hlks, inter_hlks);
     fprintf(stderr, "[M::%s] intra_ovls: %16lld inter_ovls: %16lld\n", __func__, intra_ovls, inter_ovls);
-/***
-    // build the conflict table for local-search refinement:
-    // non-repeat overlaps (hard separation floor) plus HiC links.
-    ncft = 0;
-    for (i = 0, ovl = ovls; i < novl; i++, ovl++)
-        if (!ovl->del && !(reps[ovl->aread] || reps[ovl->bread]))
-            cfts[ncft++] = (cft_t) {
-                ovl->aread,
-                ovl->bread,
-                (ovl->alen + ovl->blen) / 2,
-                CFT_OVL
-            };
 
-    // add hic links to the conflict table
-    minhv = .001;
-    for (i = 0; i < nhlk; i++) {
-        if (hlks[i].v < minhv)
-            minhv = hlks[i].v;
-    }
-    for (i = 0; i < nhlk; i++)
-        cfts[ncft++] = (cft_t) {
-            hlks[i].a, 
-            hlks[i].b, 
-            (uint32) (hlks[i].v / minhv + 1),
-            CFT_HIC
-        };
-    // sort and build index for quick search
-    qsort(cfts, ncft, sizeof(cft_t), cft_abseqs_cmpfunc);
-    a = cfts->a;
-    for (i = 1, j = 0; i < ncft; i++) {
-        if (cfts[i].a != a) {
-            index[a] = (uint64) j << 32 | (i - j);
-            a = cfts[i].a;
-            j = i;
-        }
-    }
-    index[a] = (uint64) j << 32 | (i - j);
-
-    // TODO add an extra step to group repeat sequences
-
-    // refine haplotype partition using hic links
-    refine_haplotype_partition_hic_2opt(cfts, ncft, index, haps, nseq, ploidy, vns_data);
-
-    refine_haplotype_partition_hic_kopt(cfts, ncft, index, haps, nseq, ploidy, vns_data);
-
-    intra_ovls = inter_ovls = 0;
-    for (i = 0, ovl = ovls; i < novl; i++, ovl++) {
-        if (!dels[i] && ovl->del)
-            continue;
-        if (haps[ovl->aread].hap == haps[ovl->bread].hap)
-            intra_ovls += (ovl->alen + ovl->blen) / 2;
-        else inter_ovls += (ovl->alen + ovl->blen) / 2;
-    }
-    intra_hlks = inter_hlks = .0;
-    for (i = 0; i < nhlk; i++) {
-        if (haps[hlks[i].a].hap == haps[hlks[i].b].hap)
-            intra_hlks += hlks[i].v;
-        else inter_hlks += hlks[i].v;
-    }
-    fprintf(stderr, "[M::%s] refined haplotype partition\n", __func__);
-    fprintf(stderr, "[M::%s] intra_hlks: %16.2f inter_hlks: %16.2f\n", __func__, intra_hlks, inter_hlks);
-    fprintf(stderr, "[M::%s] intra_ovls: %16lld inter_ovls: %16lld\n", __func__, intra_ovls, inter_ovls);
-
-if(0) {
-    //char *fs[2] = {"Phase_Test/drRosCani1_ec-20260618.chr1.raw.agp",
-    //               "Phase_Test/drRosCani1_ec-20260618.chr1.fix.agp"};
-    //char *fs[2] = {"Phase_Test/drRosCani1_ec-20260622.bbseq.scf_scaffolds_final.all_haps.raw.agp",
-    //               "Phase_Test/drRosCani1_ec-20260622.bbseq.scf_scaffolds_final.all_haps.fix.agp"};
-    //char *fs[1] = {"Phase_Test/drRosCani1_mc.curated.renamed.agp"};
-    char *fs[1] = {"Phase_Test/drRosAgre1_mc.curated.renamed.agp"};
-    for (int f = 0; f < sizeof(fs) / sizeof(fs[0]); f++) {
-        iostream_t *fp = iostream_open(fs[f]);
-        char *line;
-        char *fields[9];
-        while ((line = iostream_getline(fp)) != NULL) {
-            if (is_empty_line(line) || parse_line(line, fields, 9) < 9)
-                continue;
-            if (strcmp(fields[4], "W") == 0)
-                haps[sd_get(dicts, fields[5])].hap = atoi(fields[0]+strlen(fields[0])-1);
-        }
-        intra_ovls = inter_ovls = 0;
-        for (i = 0, ovl = ovls; i < novl; i++, ovl++) {
-            if (!dels[i] && ovl->del)
-                continue;
-            if (haps[ovl->aread].hap && haps[ovl->aread].hap == haps[ovl->bread].hap)
-                intra_ovls += (ovl->alen + ovl->blen) / 2;
-            else inter_ovls += (ovl->alen + ovl->blen) / 2;
-        }
-        intra_hlks = inter_hlks = .0;
-        for (i = 0; i < nhlk; i++) {
-            if (haps[hlks[i].a].hap && haps[hlks[i].a].hap == haps[hlks[i].b].hap)
-                intra_hlks += hlks[i].v;
-            else inter_hlks += hlks[i].v;
-        }
-        fprintf(stderr, "[M::%s] XXX %d\n", __func__, f+1);
-        fprintf(stderr, "[M::%s] intra_hlks: %16.2f inter_hlks: %16.2f\n", __func__, intra_hlks, inter_hlks);
-        fprintf(stderr, "[M::%s] intra_ovls: %16lld inter_ovls: %16lld\n", __func__, intra_ovls, inter_ovls);
-        iostream_close(fp);
-    }
-
-    exit(0);
-}
-**/
     // restore the deleted overlaps
     if (dels) {
         for (i = 0, ovl = ovls; i < novl; i++, ovl++)
@@ -11242,7 +11252,7 @@ if(0) {
     return;
 }
 
-static void build_haplotype_partition_overlap(ovl_t *ovls, int64 novl, sdict_t *dicts, hap_info_t *haps, int ploidy)
+static void build_haplotype_partition_overlap(ovl_t *ovls, int64 novl, hap_info_t *haps, sdict_t *dicts, int ploidy)
 {
     cft_t *cfts;
     ovl_t *ovl;
@@ -11612,7 +11622,7 @@ static void write_yahs_outputs(char *hic_bfile, hap_info_t *haps, int64 nseq, in
             l = 0;
             n = 0;
             for (k = j; k < i; k++) {
-                if (k > j) { // add gap between sequencesmake
+                if (k > j) { // add gap between sequences
                     write_agp_gap(fp2, sbuff, slen + 1, slen + LG_AGP_GAP_SIZE, ++t);
                     l += LG_AGP_GAP_SIZE;
                 }
@@ -11656,19 +11666,21 @@ static void write_yahs_outputs(char *hic_bfile, hap_info_t *haps, int64 nseq, in
             hseq = hseqs + i;
             a = hseq->seq;
             cseg = &break_dict->seg[break_dict->s[a].s];
-            fprintf(fp3, "%s\t%d\t%c\t%d\t%d\t%lld\n",
-                break_dict->sdict->s[cseg->c >> 1].name,
-                hseq->len,
+            fprintf(fp3, "%s\t%u\t%u\t%c\t%d\t%d\t%lld\n",
+                break_dict->sdict->s[cseg->c>>1].name,
+                cseg->x,
+                cseg->x + cseg->y,
                 "+-"[hseq->rev],
                 hseq->grp,
                 hseq->hap,
-                cseg->x + hseq->bpos);
+                hseq->bpos);
         }
     else
         for (i = 0; i < nseq; i++) {
             hseq = hseqs + i;
-            fprintf(fp3, "%s\t%d\t%c\t%d\t%d\t%lld\n", 
+            fprintf(fp3, "%s\t%u\t%u\t%c\t%d\t%d\t%lld\n", 
                 dicts->s[hseq->seq].name,
+                0,
                 hseq->len, 
                 "+-"[hseq->rev], 
                 hseq->grp, 
@@ -11728,7 +11740,7 @@ static void write_yahs_outputs(char *hic_bfile, hap_info_t *haps, int64 nseq, in
     }
     
     // now write binary file for hic links
-    sprintf(sbuff, "%s.bbscf-hic.bin", out_pref);
+    sprintf(sbuff, "%s.bbseq-hic.bin", out_pref);
     write_binary_hic_data_pseudo_yahs(hic_bfile, bdicts, break_dict, segs, sbuff);
 
     free(ends[0]);
@@ -11789,7 +11801,7 @@ scf_t *build_pseudo_scaffolds(ovl_t *ovls, int64 novl, sdict_t *dicts, asm_dict_
         build_scaffold_partition(ovls, novl, haps, dicts, buscos, ploidy, min_ext, 1);
     } else {
         // build haplotype partition using overlaps only
-        build_haplotype_partition_overlap(ovls, novl, dicts, haps, ploidy);
+        build_haplotype_partition_overlap(ovls, novl, haps, dicts, ploidy);
         // build scaffold blocks (with haplotype partition)
         build_scaffold_partition(ovls, novl, haps, dicts, buscos, ploidy, min_ext, 1);
     }
@@ -11861,6 +11873,10 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     if (opts_out & AGP_OUT) {
         sprintf(file, "%s.grp.agp", pref_out);
         fo = fopen(file, "w");
+        if (!fo) {
+            fprintf(stderr, "[E::%s] failed to open output file %s\n", __func__, file);
+            exit(EXIT_FAILURE);
+        }
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 
             grp = scf->grp+1;
@@ -11897,6 +11913,10 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     if (opts_out & GRP_OUT) {
         sprintf(file, "%s.grp.txt", pref_out);
         fo = fopen(file, "w");
+        if (!fo) {
+            fprintf(stderr, "[E::%s] failed to open output file %s\n", __func__, file);
+            exit(EXIT_FAILURE);
+        }
         fprintf(fo, "#s_id\ts_beg\ts_end\tgrp\thap\tscf\n");
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 
@@ -11926,6 +11946,10 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
     if (opts_out & PLT_OUT) {
         sprintf(file, "%s.plt.txt", pref_out);
         fo = fopen(file, "w");
+        if (!fo) {
+            fprintf(stderr, "[E::%s] failed to open output file %s\n", __func__, file);
+            exit(EXIT_FAILURE);
+        }
         for (i = 0; i < nscf; i++) {
             scf = &scfs[i]; 
             grp = scf->grp+1;
@@ -11954,5 +11978,23 @@ void write_scf_outputs(scf_t *scfs, int nscf, sdict_t *dicts, asm_dict_t *break_
 
     free(file);
     free(name);
+}
+
+void write_ploidy_file(int ploidy_num, char *pref_out)
+{
+    char *file;
+    FILE *fo;
+    
+    MYMALLOC(file, strlen(pref_out) + 35);
+    sprintf(file, "%s.ploidy", pref_out);
+    fo = fopen(file, "w");
+    if (!fo) {
+        fprintf(stderr, "[E::%s] failed to open output file %s\n", __func__, file);
+        exit(EXIT_FAILURE);
+    }
+    fprintf(fo, "Ploidy\t%d\n", ploidy_num);
+    fclose(fo);
+
+    free(file);
 }
 

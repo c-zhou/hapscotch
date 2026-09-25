@@ -244,7 +244,7 @@ Or using `minibwa` instead of `bwa-mem2`:
 # index the genome
 minibwa index -t4 genome.fa genome
 
-# align hic reads in FASTQ format
+# align hic reads in FASTA/Q format
 minibwa map --hic -t16 genome R1.fq.gz R2.fq.gz | \
     samtools fixmate -mpu - - | \
     samtools sort --write-index -l1 -o hic.srt.bam
@@ -260,12 +260,13 @@ This is a minimal pipeline for aligning Hi-C reads with `bwa-mem2`/`minibwa`, im
 
 If you have multiple Hi-C libraries, repeat this — except for the genome index step — for each library, giving one BAM file per library.
 
-You can also give `bwa-mem2`/`minibwa` a single FASTQ file containing interleaved paired-end Hi-C reads or a `stdin` stream input. For example, if you have a name-sorted BAM/CRAM:
+You can also give `bwa-mem2`/`minibwa` a single FASTA/Q file containing interleaved paired-end Hi-C reads or a `stdin` stream input. For example, if you have a name-sorted BAM/CRAM:
 
 ```bash
 # using bwa-mem2 with '-p'
 samtools fasta -F0xB00 -n hic-in.bam | \
     bwa-mem2 mem -5SP -p genome - | \
+    ...
 # using minibwa
 samtools fasta -F0xB00 -n hic-in.bam | \
     minibwa map --hic -t16 genome - | \

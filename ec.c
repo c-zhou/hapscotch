@@ -163,13 +163,57 @@ static int ec_pos_cmpfunc(const void *a, const void *b)
     return (pa->pos > pb->pos) - (pa->pos < pb->pos);
 }
 
-static int call_breaks(double *cnts, double *meds, int n, int min_bins, 
-    double med_drop, double rec_rate, int64 *tspace)
+static inline void calc_med2(double *cnts, int n, double *med2[2], DynamicPercentile_t *dp50, double *meds)
 {
-    int i, j, p, beg, end, ncall, run_length;
-    double min_med, min_cnt;
+    int i, k, beg, end;
+    double f, *med;
 
-    MYBZERO(tspace, n+1);
+    // calculate left- and right-medians
+    for (k = 1; k >= -1; k -= 2) {
+        if (k > 0) {
+            beg = 0;
+            end = n;
+            med = med2[0];
+        } else {
+            beg = n - 1;
+            end = -1;
+            med = med2[1];
+        }
+        // reset dynamic percentiles for the new sequence
+        dynamic_percentile_clear(dp50);
+        for (i = beg; i != end; i += k) {
+            dynamic_percentile_insert(dp50, cnts[i]);
+            med[i] = dynamic_percentile_get(dp50);
+        }
+    }
+
+    // collect min-medians
+    meds[0]   = med2[1][1];
+    meds[n-1] = med2[0][n-2];
+    for (i = 1; i < n-1; i++)
+        meds[i] = MIN(med2[0][i-1], med2[1][i+1]);
+    for (i = 0; i < n; i++) {
+        f = meds[i];
+        f = f > 0? cnts[i] / f : 1.;
+        meds[i] = MIN(f, 1.);
+    }
+}
+
+static int call_breaks(int s, double *cnts, int shft, int n, int min_bins, double med_drop, double rec_rate, 
+    double *med2[2], DynamicPercentile_t *dp50, double *meds, int64 *pts, ec_pos_v *calls)
+{
+    if (n <= min_bins * 2)
+        return 0;
+
+    ec_pos_t *call;
+    int i, j, p, b, e, ncall, mcall, run_length;
+    double min_med, min_cnt, *cnt;
+
+    // calculate min-medians
+    calc_med2(cnts, n, med2, dp50, meds);
+
+    // mark normal regions
+    MYBZERO(pts, n+1);
     run_length = 0;
     for (i = 0; i <= n ; i++) {
         if (i < n && meds[i] >= rec_rate) {
@@ -177,23 +221,26 @@ static int call_breaks(double *cnts, double *meds, int n, int min_bins,
         } else {
             if (run_length >= min_bins)
                 for (j = i - run_length; j < i; j++)
-                    tspace[j] = 1;
+                    pts[j] = 1;
             run_length = 0;
         }
     }
 
-    ncall = 0;
+    // initial number of calls
+    mcall = calls->n;
+
+    // call break points in valleys
     i = 0;
     while (i < n) {
-        if (tspace[i] == 0) {
-            beg = i;
-            while (i < n && tspace[i] == 0) ++i;
-            end = i;
-            if (beg > 0 && end < n) {
-                min_med = meds[beg];
-                min_cnt = cnts[beg];
-                p = beg;
-                for (j = beg + 1; j < end; j++) {
+        if (pts[i] == 0) {
+            b = i;
+            while (i < n && pts[i] == 0) ++i;
+            e = i;
+            if (b > 0 && e < n) {
+                min_med = meds[b];
+                min_cnt = cnts[b];
+                p = b;
+                for (j = b + 1; j < e; j++) {
                     if (meds[j] < min_med) {
                         min_med = meds[j];
                         min_cnt = cnts[j];
@@ -204,14 +251,40 @@ static int call_breaks(double *cnts, double *meds, int n, int min_bins,
                         p = j;
                     }
                 }
-                if (min_med < med_drop)
+                if (min_med < med_drop) {
                     // mark the position p as a call break
-                    tspace[ncall++] = p; // this is safe
+                    kv_pushp(ec_pos_t, *calls, &call);
+                    cnt = call->cnts;
+                    cnt[0] = med2[0][p-1];
+                    cnt[1] = cnts[p];
+                    cnt[2] = med2[1][p+1];
+                    call->seq = s;
+                    call->pos = p;
+                    call->pval = calculate_poisson_lower_pvalue((int)cnt[1], MIN(cnt[0], cnt[2]));
+                }
             }
         } else i++;
     }
 
-    return ncall;
+    // recursive detection for each segement
+    ncall = calls->n;
+    if (ncall > mcall) {
+        p = calls->a[mcall].pos;
+        (void) call_breaks(s, cnts + 0, shft + 0, p - 0, min_bins, med_drop, rec_rate, med2, dp50, meds, pts, calls);
+        for (i = mcall+1; i < ncall; i++) {
+            b = calls->a[i-1].pos;
+            e = calls->a[i].pos;
+            (void) call_breaks(s, cnts + b, shft + b, e - b, min_bins, med_drop, rec_rate, med2, dp50, meds, pts, calls);    
+        }
+        p = calls->a[ncall-1].pos;
+        (void) call_breaks(s, cnts + p, shft + p, n - p, min_bins, med_drop, rec_rate, med2, dp50, meds, pts, calls);
+    }
+    
+    // change to the actual positions
+    for (i = mcall; i < ncall; i++)
+        calls->a[i].pos += shft;
+
+    return (calls->n - mcall);
 }
 
 ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall)
@@ -219,10 +292,10 @@ ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall)
     ec_pos_v _calls = {0, 0, 0}, *calls = &_calls;
     ec_pos_t *call;
     DynamicPercentile_t *dp50;
-    int64 i, j, k, p, n, beg, end, nseq, acnt, tcnt;
+    int64 i, j, n, nseq, acnt, tcnt;
     int64 mbin, tbin, *tspace, *bins;
     uint32 s;
-    double *sspace, *span, **spans, *cnt, *med, *meds[2];
+    double *sspace, *span, **spans, *meds[2];
     double f, df, mf, med_drop, rec_rate, p_thresh;
     int a, b, min_bins, max_bins, ncall;
     
@@ -337,57 +410,13 @@ ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall)
     rec_rate = ec_conf.rec_rate;
     dp50 = dynamic_percentile_create(mbin, 0.5);
     for (i = 0; i < nseq; i++) {
-        n = bins[i];
-        span = spans[i];
-
-        if (n <= min_bins * 2)
-            continue;
-
-        // calculate left- and right-medians
-        for (k = 1; k >= -1; k -= 2) {
-            if (k > 0) {
-                beg = 0;
-                end = n;
-                med = meds[0];
-            } else {
-                beg = n - 1;
-                end = -1;
-                med = meds[1];
-            }
-            // reset dynamic percentiles for the new sequence
-            dynamic_percentile_clear(dp50);
-            for (j = beg; j != end; j += k) {
-                dynamic_percentile_insert(dp50, span[j]);
-                med[j] = dynamic_percentile_get(dp50);
-            }
-        }
-
-        // collect min-medians
-        sspace[0]   = meds[1][1];
-        sspace[n-1] = meds[0][n-2];
-        for (j = 1; j < n-1; j++)
-            sspace[j] = MIN(meds[0][j-1], meds[1][j+1]);
-        for (j = 0; j < n; j++) {
-            f = sspace[j];
-            f = f > 0? span[j] / f : 1.;
-            sspace[j] = MIN(f, 1.);
-        }
-
-        // do actual detection
-        ncall = call_breaks(span, sspace, n, min_bins, med_drop, rec_rate, tspace);
-        for (j = 0; j < ncall; j++) {
-            kv_pushp(ec_pos_t, *calls, &call);
-            p = tspace[j];
-            cnt = call->cnts;
-            cnt[0] = meds[0][p-1];
-            cnt[1] = span[p];
-            cnt[2] = meds[1][p+1];
-            call->seq = i;
-            call->pos = p;
-            call->pval = calculate_poisson_lower_pvalue((int)cnt[1], MIN(cnt[0], cnt[2]));
-        }
+        ncall = call_breaks(i, spans[i], 0, bins[i], min_bins, med_drop, rec_rate, 
+            meds, dp50, sspace, tspace, calls);
 
 #ifdef DEBUG_ERROR_CORRECTION
+        n = bins[i];
+        span = spans[i];
+        calc_med2(span, n, meds, dp50, sspace);
         MYBZERO(tspace, n);
         for (j = calls->n - ncall; j < calls->n; j++)
             tspace[calls->a[j].pos] = (int) (-log(calls->a[j].pval + 1e-300));

@@ -27,5 +27,6 @@ dependencies:
   - git
   - samtools
   - fastga
+  - bwa-mem2
   - minibwa
   - yahs

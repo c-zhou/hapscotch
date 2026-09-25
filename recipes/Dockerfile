@@ -1,5 +1,5 @@
 # HapScotch - full pipeline image (hapscotch/hapcure/hictools/seqtools/hapcount
-# + FastGA/minibwa/samtools/YaHS + scripts/run_pipeline.py and its helpers).
+# + FastGA/bwa-mem2/minibwa/samtools/YaHS + scripts/run_pipeline.py and its helpers).
 #
 # Build:  docker build -t hapscotch -f recipes/Dockerfile .
 # Run:    docker run --rm -v "$PWD":/data -w /data hapscotch run_pipeline.py -h
@@ -9,7 +9,7 @@ FROM condaforge/miniforge3:latest
 
 RUN mamba create -y -n hapscotch -c conda-forge -c bioconda \
         python numpy matplotlib-base make cmake zlib \
-        c-compiler cxx-compiler git samtools fastga minibwa yahs \
+        c-compiler cxx-compiler git samtools fastga bwa-mem2 minibwa yahs \
     && mamba clean -afy
 ENV PATH=/opt/conda/envs/hapscotch/bin:$PATH
 

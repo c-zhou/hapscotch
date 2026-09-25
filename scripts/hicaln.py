@@ -4,13 +4,13 @@ hicaln.py - HiC read alignment submodule for run_pipeline.py.
 
 Called as: hicaln.py [-t THREADS] -o out_prefix seqfile hicfile
 
-Aligns one HiC input against seqfile using minibwa (--hic mode) and produces a
-name-sorted, duplicate-marked BAM at <out_prefix>.bam. All working files
-(reference index, intermediates) are written alongside <out_prefix> - the
+Aligns one HiC input against seqfile using minibwa (--hic mode) or bwa-mem2
+and produces a name-sorted, duplicate-marked BAM at <out_prefix>.bam. All working
+files (reference index, intermediates) are written alongside <out_prefix> - the
 caller is expected to point out_prefix at a dedicated directory (e.g.
-data/hicalns/hicaln.0) shared across all HiC inputs, since the minibwa
-reference index (<dir>/ref.l2b + <dir>/ref.mbw) is built once in that
-directory and reused (skipped if already present) for every subsequent call.
+data/hicalns/hicaln.0) shared across all HiC inputs, since the reference index
+is built once in that directory and reused (skipped if already present) for
+every subsequent call.
 
 hicfile may be:
   - a single .bam/.cram file (reads are re-extracted to FASTA via `samtools
@@ -19,11 +19,11 @@ hicfile may be:
   - two comma-separated mate fasta/fastq[.gz] files, e.g. R1.fq.gz,R2.fq.gz
 
 Pipeline per input, all under the out_prefix's directory:
-  [once]  minibwa index -t<=4> <seqfile> <dir>/ref
-  bam/cram:  samtools fasta -F0xB00 -n <in> | minibwa map --hic -t<T> ref - |
+  [once]  aligner index <seqfile> <dir>/ref
+  bam/cram:  samtools fasta -F0xB00 -n <in> | aligner map/mem ref - |
              samtools fixmate -mpu - - | samtools sort --write-index -l1
              -T <out_prefix>.tmp -o <out_prefix>.srt.bam -
-  fasta/q:   minibwa map --hic -t<T> ref <in1> [in2] | samtools fixmate -mpu
+  fasta/q:   aligner map/mem ref <in1> [in2] | samtools fixmate -mpu
              - - | samtools sort --write-index -l1 -T <out_prefix>.tmp
              -o <out_prefix>.srt.bam -
   samtools markdup --write-index -c -@<T> -T <out_prefix>.mkdup.tmp
@@ -64,26 +64,32 @@ def _is_bam_cram(path: str) -> bool:
     return Path(path).suffix.lower() in (".bam", ".cram")
 
 
-def _index_genome(seqfile: Path, workdir: Path, threads: int, minibwa_bin: str) -> Path:
+def _index_genome(seqfile: Path, workdir: Path, threads: int, aligner: str, aligner_bin: str) -> Path:
     ref_prefix = workdir / "ref"
-    l2b = Path(f"{ref_prefix}.l2b")
-    mbw = Path(f"{ref_prefix}.mbw")
-    if l2b.exists() and mbw.exists():
-        _log("index", f"skip (already indexed: {l2b}, {mbw})")
+    exts = [".0123", ".amb", ".ann", ".bwt.2bit.64", ".pac"] if aligner == "bwamem2" else [".l2b", ".mbw"]
+    idx_files = [Path(f"{ref_prefix}{ext}") for ext in exts]
+    if all(f.exists() for f in idx_files):
+        _log("index", f"skip (already indexed: {ref_prefix})")
         return ref_prefix
-    index_threads = min(threads, 4)  # indexing itself doesn't benefit past ~4 threads
-    _run_stage("index", [minibwa_bin, "index", f"-t{index_threads}", str(seqfile), str(ref_prefix)])
-    if not (l2b.exists() and mbw.exists()):
-        raise HicAlnError(f"[index] completed but expected output(s) missing: {l2b}, {mbw}")
+    if aligner == "bwamem2":
+        _run_stage("index", [aligner_bin, "index", "-p", str(ref_prefix), str(seqfile)])
+    else:
+        index_threads = min(threads, 4)
+        _run_stage("index", [aligner_bin, "index", f"-t{index_threads}", str(seqfile), str(ref_prefix)])
+    if not all(f.exists() for f in idx_files):
+        raise HicAlnError(f"[index] completed but expected output(s) missing: {ref_prefix}")
     return ref_prefix
 
 
 def _align(hicfile: str, ref_prefix: Path, out_prefix: str, threads: int,
-           minibwa_bin: str, samtools_bin: str) -> str:
+           aligner: str, aligner_bin: str, samtools_bin: str) -> str:
     srt_bam = f"{out_prefix}.srt.bam"
     tmp_prefix = f"{out_prefix}.tmp"
-    map_cmd = f"{shlex.quote(minibwa_bin)} map --hic -t {threads} {shlex.quote(str(ref_prefix))}"
+    mode = "mem -5SP" if aligner == "bwamem2" else "map --hic"
+    map_cmd = f"{shlex.quote(aligner_bin)} {mode} -t {threads} {shlex.quote(str(ref_prefix))}"
     if _is_bam_cram(hicfile):
+        if aligner == "bwamem2":
+            map_cmd += " -p"
         cmd = (
             f"{shlex.quote(samtools_bin)} fasta -F0xB00 -n {shlex.quote(hicfile)} | "
             f"{map_cmd} - | "
@@ -96,6 +102,8 @@ def _align(hicfile: str, ref_prefix: Path, out_prefix: str, threads: int,
         if len(inputs) > 2:
             raise HicAlnError(f"[align] expected at most 2 comma-separated mate files, "
                                f"got {len(inputs)}: {hicfile}")
+        if aligner == "bwamem2" and len(inputs) == 1:
+            map_cmd += " -p"
         quoted_inputs = " ".join(shlex.quote(i) for i in inputs)
         cmd = (
             f"{map_cmd} {quoted_inputs} | "
@@ -148,8 +156,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                                    "fasta/fastq[.gz] files")
     p.add_argument("-o", "--out-prefix", required=True, metavar="PREFIX",
                    help="output prefix; final alignment is PREFIX.bam, all working files "
-                        "(including the shared minibwa index) are written next to it")
+                        "(including the shared reference index) are written next to it")
+    p.add_argument("-a", "--aligner", choices=["bwamem2", "minibwa"], default="bwamem2",
+                   help="aligner program to use [bwamem2]")
     p.add_argument("-t", "--threads", type=int, default=8, help="threads [8]")
+    p.add_argument("--bwamem2-bin", default="bwa-mem2", help="path to the bwa-mem2 executable [bwa-mem2]")
     p.add_argument("--minibwa-bin", default="minibwa", help="path to the minibwa executable [minibwa]")
     p.add_argument("--samtools-bin", default="samtools", help="path to the samtools executable [samtools]")
     return p
@@ -158,7 +169,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
-    missing = [t for t in (args.minibwa_bin, args.samtools_bin) if shutil.which(t) is None]
+    aligner_bin = args.bwamem2_bin if args.aligner == "bwamem2" else args.minibwa_bin
+    missing = [t for t in (aligner_bin, args.samtools_bin) if shutil.which(t) is None]
     if missing:
         _log("preflight", f"error: required tool(s) not found on PATH: {', '.join(missing)}")
         return 1
@@ -167,9 +179,9 @@ def main(argv=None) -> int:
     workdir.mkdir(parents=True, exist_ok=True)
 
     try:
-        ref_prefix = _index_genome(Path(args.seqfile), workdir, args.threads, args.minibwa_bin)
+        ref_prefix = _index_genome(Path(args.seqfile), workdir, args.threads, args.aligner, aligner_bin)
         srt_bam = _align(args.hicfile, ref_prefix, args.out_prefix, args.threads,
-                          args.minibwa_bin, args.samtools_bin)
+                          args.aligner, aligner_bin, args.samtools_bin)
         mkdup_bam = _markdup(srt_bam, args.out_prefix, args.threads, args.samtools_bin)
         out_bam = _name_sort(mkdup_bam, args.out_prefix, args.threads, args.samtools_bin)
         _cleanup(srt_bam, mkdup_bam)

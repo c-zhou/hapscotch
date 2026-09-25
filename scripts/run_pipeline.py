@@ -69,6 +69,17 @@ def _add_repo_root_to_path() -> None:
         os.environ["PATH"] = os.pathsep.join([root] + path_dirs)
 
 
+def _resolve_exe(tool: str) -> str:
+    """Resolve tool name or path to its real absolute path if it exists, else keep unchanged."""
+    found = shutil.which(tool)
+    if found:
+        return str(Path(found).resolve())
+    p = Path(tool)
+    if p.exists():
+        return str(p.resolve())
+    return tool
+
+
 # --------------------------------------------------------------------------- #
 # shared pipeline context (paths, binaries, resources)
 # --------------------------------------------------------------------------- #
@@ -86,7 +97,10 @@ class Ctx:
     hapcure_bin: str = "hapcure"
     yahs_bin: str = "yahs"
     fastga_bin: str = "FastGA"
+    bwamem2_bin: str = "bwa-mem2"
     minibwa_bin: str = "minibwa"
+    hic_aligner: str = "bwamem2"
+    seq_aligner: str = "FastGA"
     samtools_bin: str = "samtools"
 
     @property
@@ -128,10 +142,7 @@ class Ctx:
 
 def link_ref_genome(ctx: Ctx) -> Path:
     """Symlink the input genome into datadir/ref.fa[.gz] and return that path,
-    for use as the reference from here on instead of ctx.seqfile directly.
-    FastGA (and other tools) write index/database files next to whatever
-    genome path they're given, so operating on a symlink inside datadir keeps
-    those out of the original genome file's directory."""
+    for use as the reference from here on instead of ctx.seqfile directly."""
     target = ctx.seqfile.resolve()
     ref_link = ctx.datadir / ("ref.fa.gz" if target.name.endswith(".gz") else "ref.fa")
     if ref_link.is_symlink():
@@ -153,9 +164,7 @@ def link_ref_genome(ctx: Ctx) -> Path:
 # --------------------------------------------------------------------------- #
 
 def run_cmd(cmd, log_path: Path, *, shell: bool = False, cwd: Optional[Path] = None) -> None:
-    """Run `cmd` (list of args, or a string if shell=True), tee-ing combined
-    stdout/stderr to log_path. Raises PipelineError on non-zero exit or if the
-    executable itself cannot be found/launched."""
+    """Run `cmd`, tee-ing stdout/stderr to log_path."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     printable = cmd if isinstance(cmd, str) else " ".join(shlex.quote(str(c)) for c in cmd)
     _log(f"running: {printable}")
@@ -193,6 +202,7 @@ def _parse_opts(opt_list: list) -> list:
         res.extend(shlex.split(opt_str))
     return res
 
+
 def require_outputs(outputs) -> None:
     missing = [str(o) for o in outputs if not Path(o).exists()]
     if missing:
@@ -202,7 +212,7 @@ def require_outputs(outputs) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# preflight - fail fast if a tool a step needs isn't available, before running anything
+# preflight - check tool availability before running
 # --------------------------------------------------------------------------- #
 
 def _check_binary(name: str, target: str) -> Optional[str]:
@@ -218,14 +228,15 @@ def _check_script(name: str, target: Path) -> Optional[str]:
 
 
 def preflight_check(ctx: Ctx, steps: list) -> None:
-    """Verify every external tool/script needed by the steps that are actually
-    applicable to this run (Step.applicable()) can be found, before anything
-    runs - e.g. yahs/hictools-prepare/hicmap.py are only required when the
-    yahs_scaffold step is actually going to run."""
+    """Verify every external tool/script needed by applicable steps can be found."""
+    aligner_bin = ctx.bwamem2_bin if ctx.hic_aligner == "bwamem2" else ctx.minibwa_bin
+
     checks_by_step = {
         "seq_index":       [("seqtools", ctx.seqtools)],
-        "self_align":      [("selfaln.py", SELFALN_PY)],
-        "hic_align":       [("hicaln.py", HICALN_PY)],
+        "self_align":      [("selfaln.py", SELFALN_PY), (ctx.fastga_bin, ctx.fastga_bin)],
+        "hic_align":       [("hicaln.py", HICALN_PY),
+                            (ctx.hic_aligner, aligner_bin),
+                            ("samtools", ctx.samtools_bin)],
         "hic_convert":     [("hictools", ctx.hictools)],
         "contig_ec":       [("hapcure", ctx.hapcure_bin)],
         "hapscotch":       [("hapscotch", ctx.hapscotch_bin)],
@@ -263,9 +274,9 @@ def preflight_check(ctx: Ctx, steps: list) -> None:
 @dataclass
 class Step:
     name: str
-    outputs: Callable[[], list]   # -> list of Path that must exist when done
+    outputs: Callable[[], list]
     run: Callable[[], None]
-    applicable: Callable[[], bool] = field(default=lambda: True)  # step even needed?
+    applicable: Callable[[], bool] = field(default=lambda: True)
 
 
 def run_step(step: Step, *, force: bool, force_from: bool) -> None:
@@ -296,7 +307,7 @@ def step_seq_index(ctx: Ctx) -> Step:
     return Step("seq_index", lambda: [ctx.idxfile], _run)
 
 
-def step_self_align(ctx: Ctx, args) -> Step:
+def step_self_align(ctx: Ctx, args) -> tuple:
     out = ctx.datadir / "seqaln.paf"
 
     def _resolved_path() -> Path:
@@ -327,16 +338,18 @@ def step_hic_align(ctx: Ctx, args) -> tuple:
 
     def _run():
         ctx.hicaln_dir.mkdir(parents=True, exist_ok=True)
-        for src, prefix, out in zip(hicfiles, prefixes, generated):
+        for src, prefix in zip(hicfiles, prefixes):
             run_cmd(
                 [sys.executable, str(HICALN_PY), str(ctx.seqfile), str(src),
                  "-o", str(prefix), "-t", str(ctx.threads),
-                 "--minibwa-bin", args.minibwa_bin, "--samtools-bin", args.samtools_bin],
+                 "-a", args.hic_aligner,
+                 "--bwamem2-bin", args.bwamem2_bin,
+                 "--minibwa-bin", args.minibwa_bin,
+                 "--samtools-bin", args.samtools_bin],
                 ctx.logdir / f"hic_align.{prefix.name}.log",
             )
 
     def _resolved_hicalns() -> list:
-        # user-supplied pre-aligned files + freshly generated ones
         return list(args.hic_aln or []) + generated
 
     return Step("hic_align", lambda: list(generated), _run, applicable=_applicable), _resolved_hicalns
@@ -346,7 +359,6 @@ def step_hic_convert(ctx: Ctx, resolved_hicalns_fn) -> tuple:
     out = ctx.datadir / "hicaln.bin"
 
     def _is_passthrough() -> bool:
-        # a single already-BIN input is passed through unchanged, no new file written
         hicalns = resolved_hicalns_fn()
         return len(hicalns) == 1 and str(hicalns[0]).endswith(".bin")
 
@@ -372,14 +384,11 @@ def step_hic_convert(ctx: Ctx, resolved_hicalns_fn) -> tuple:
             return None
         if out.exists():
             return out
-        # hictools convert passed a single already-BIN input straight through
         if _is_passthrough():
             return Path(hicalns[0])
         return None
 
     def _will_have_hic() -> bool:
-        # decidable purely from CLI inputs - safe to call before hic_convert has run,
-        # unlike _resolved_hicbin() which depends on files that may not exist yet
         return len(resolved_hicalns_fn()) > 0
 
     return Step("hic_convert", _outputs, _run,
@@ -413,8 +422,7 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
     prefix = ctx.hapscotch_dir / "haps"
     outs = [Path(f"{prefix}.grp.agp"),
             Path(f"{prefix}.grp.txt"),
-            Path(f"{prefix}.ploidy"),
-            ]
+            Path(f"{prefix}.ploidy")]
 
     def _run():
         ctx.hapscotch_dir.mkdir(parents=True, exist_ok=True)
@@ -438,6 +446,7 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
         
     return Step("hapscotch", lambda: outs, _run)
 
+
 def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
     hap_prefix = ctx.hapscotch_dir / "haps"
     yahs_prefix = ctx.yahs_dir / "bbseq"
@@ -455,8 +464,7 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
         for needed in (bbseq_agp, bbscf_agp, bbscf_hic_bin, seq_hic_bin):
             if not needed.exists():
                 raise PipelineError(
-                    f"YaHS branch requested but required hapscotch output missing: {needed}\n"
-                    "(hapscotch only writes these when run with -c/HiC data and -Y)"
+                    f"YaHS branch requested but required hapscotch output missing: {needed}"
                 )
 
         bbseq_fa = ctx.yahs_dir / "haps.bbseq.fa.gz"
@@ -466,7 +474,7 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
              ctx.logdir / "yahs.seqtools_bbseq.log",
         )
 
-        bbseq_idx = f"{bbseq_fa}.fai" # yahs need .fai not .idx
+        bbseq_idx = f"{bbseq_fa}.fai"
         run_cmd(
             [ctx.seqtools, "idx", "-o", str(bbseq_idx), str(bbseq_fa)],
             ctx.logdir / "yahs.seqtools_bbidx.log",
@@ -483,8 +491,6 @@ def step_yahs_scaffold(ctx: Ctx, args, resolved_hicbin_fn, run_yahs_fn) -> Step:
 
 
 def _find_yahs_scaffolds_agp(prefix: Path) -> Path:
-    """yahs's exact output-file naming can vary by build; probe the common
-    patterns instead of hard-coding one."""
     candidates = [
         Path(f"{prefix}_scaffolds_final.agp"),
         Path(f"{prefix}.agp"),
@@ -496,9 +502,9 @@ def _find_yahs_scaffolds_agp(prefix: Path) -> Path:
     if globbed:
         return Path(globbed[0])
     raise PipelineError(
-        f"could not locate yahs scaffold AGP output near prefix {prefix} "
-        f"(tried {', '.join(str(c) for c in candidates)})"
+        f"could not locate yahs scaffold AGP output near prefix {prefix}"
     )
+
 
 def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn) -> Step:
     def _outputs():
@@ -506,9 +512,7 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
                 ctx.results_dir / "haps.grp.agp", 
                 ctx.results_dir / "haps.grp.txt"]
         if resolved_agpec_fn():
-            outs += [
-                ctx.results_dir / "haps.ctg-ec.agp",
-            ]
+            outs += [ctx.results_dir / "haps.ctg-ec.agp"]
         if run_yahs_fn():
             outs += [
                 ctx.results_dir / "haps-all.scf.agp",
@@ -524,12 +528,10 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
         shutil.copy(f"{hap_prefix}.grp.txt", ctx.results_dir / "haps.grp.txt")
         shutil.copy(f"{hap_prefix}.ploidy",  ctx.results_dir / "haps.cnt.txt")
 
-        # ploidy number
         ploidy = 0
         with open(ctx.results_dir / "haps.cnt.txt") as f:
             ploidy = max((int(line.split()[1]) for line in f), default=0)
 
-        # AGP and FASTA of contigs for each individual haplotype
         grp_file = str(ctx.results_dir / "haps.grp.txt")
         for hap in range(1, ploidy + 1):
             hap_agp = ctx.results_dir / f"haps-{hap}.ctg.agp"
@@ -563,7 +565,6 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
             yahs_agp = _find_yahs_scaffolds_agp(ctx.yahs_dir / "bbseq")
             bbpos_txt = ctx.hapscotch_dir / "haps.bbpos.txt"
             
-            # AGP for all haplotypes
             scfall_agp = ctx.results_dir / "haps-all.scf.agp"
             run_cmd(
                 [ctx.seqtools, "hap", "-o", str(scfall_agp), 
@@ -571,7 +572,6 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
                 ctx.logdir / "res.seqtools_scf_all_agp.log",
             )
 
-            # AGP and FASTA for each individual haplotype
             for hap in range(1, ploidy + 1):
                 hap_agp = ctx.results_dir / f"haps-{hap}.scf.agp"
                 hap_fa  = ctx.results_dir / f"haps-{hap}.scf.fa.gz"
@@ -586,7 +586,6 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
                     ctx.logdir / f"res.seqtools_scf_hap{hap}_fa.log",
                 )
 
-            # generate hic plots
             hic_txt = ctx.results_dir / "haps-all.scf.hic.txt"
             run_cmd(
                 [ctx.hictools, "prepare", "-a", str(scfall_agp), "-n", "3000", "-o", str(hic_txt)] + 
@@ -617,9 +616,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("seqfile", help="genome sequence file (fasta[.gz]), positional")
 
     p.add_argument("-o", "--outdir", default=None, help="output directory [HapScotch_OUT_<YYYYMMDD>]")
-    p.add_argument("-a", "--agp", metavar="AGP", help="existing error-correction AGP")
+    p.add_argument("-a", "--agp", metavar="AGP", 
+                   help="existing error-correction AGP; skips error correction")
+    p.add_argument("-p", "--ploidy", type=int, default=0, 
+                   help="ploidy number; skips ploidy estimation")
     p.add_argument("-t", "--threads", type=int, default=8, help="threads [8]")
-    p.add_argument("-p", "--ploidy", type=int, default=0, help="ploidy number [0]")
     p.add_argument("-v", "--verbose", type=int, default=0, help="verbose level [0]")
 
     aln = p.add_argument_group("alignment inputs")
@@ -629,6 +630,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                       help="pre-aligned HiC file (BED/PA5/BAM/BIN); repeatable")
     aln.add_argument("--hic-file", action="append", metavar="FILE", default=[],
                       help="raw HiC fastq/a file to align via hicaln.py; repeatable")
+    
+    ap = p.add_argument_group("aligner program")
+    ap.add_argument("--seq-aligner", choices=["FastGA"], default="FastGA",
+                      help="aligner program for sequence comparison [FastGA]")
+    ap.add_argument("--hic-aligner", choices=["bwamem2", "minibwa"], default="bwamem2",
+                      help="aligner program for raw HiC files [bwamem2]")
 
     hs = p.add_argument_group("hapscotch options")
     hs.add_argument("--hapscotch-opt", action="append", default=[],
@@ -664,6 +671,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bins.add_argument("--hapcure-bin", default="hapcure")
     bins.add_argument("--yahs-bin", default="yahs")
     bins.add_argument("--fastga-bin", default="FastGA")
+    bins.add_argument("--bwamem2-bin", default="bwa-mem2")
     bins.add_argument("--minibwa-bin", default="minibwa")
     bins.add_argument("--samtools-bin", default="samtools")
 
@@ -675,12 +683,10 @@ STEP_NAMES = [
     "contig_ec", "hapscotch", "yahs_scaffold", "collect_results",
 ]
 
-# argparse fields that don't affect what the pipeline does/produces, so they're
-# excluded from the OUTDIR/data/CMD record used to validate a --force*/--resume run
 _NON_CRITICAL_PARAM_KEYS = {
     "resume", "force", "force_from", "verbose", "outdir",
     "seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin", "yahs_bin", "fastga_bin",
-    "minibwa_bin", "samtools_bin",
+    "bwamem2_bin", "minibwa_bin", "samtools_bin",
 }
 
 
@@ -700,6 +706,10 @@ def main(argv=None) -> int:
     _add_repo_root_to_path()
     args = build_arg_parser().parse_args(argv)
 
+    for k in ("seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin",
+              "yahs_bin", "fastga_bin", "bwamem2_bin", "minibwa_bin", "samtools_bin"):
+        setattr(args, k, _resolve_exe(getattr(args, k)))
+
     outdir = Path(args.outdir) if args.outdir else Path(
         f"HapScotch_OUT_{datetime.now():%Y%m%d}"
     )
@@ -710,7 +720,7 @@ def main(argv=None) -> int:
     if outdir_existed and not resuming:
         _log(f"error: output directory '{outdir}' already exists. Use --resume to "
              f"continue from where it stopped, --force to rerun everything, or "
-             f"--force-from STEP to rerun from a specific step.")
+             f"--force-from STEP to rerun a specific step.")
         return 1
 
     if resuming and not outdir_existed:
@@ -731,8 +741,9 @@ def main(argv=None) -> int:
         seqfile=Path(args.seqfile), outdir=outdir, threads=args.threads, verbose=args.verbose,
         seqtools=args.seqtools_bin, hictools=args.hictools_bin,
         hapscotch_bin=args.hapscotch_bin, hapcure_bin=args.hapcure_bin,
-        yahs_bin=args.yahs_bin, fastga_bin=args.fastga_bin, minibwa_bin=args.minibwa_bin, 
-        samtools_bin=args.samtools_bin
+        yahs_bin=args.yahs_bin, fastga_bin=args.fastga_bin,
+        bwamem2_bin=args.bwamem2_bin, minibwa_bin=args.minibwa_bin,
+        seq_aligner=args.seq_aligner, hic_aligner=args.hic_aligner, samtools_bin=args.samtools_bin
     )
     ctx.ensure_dirs()
 
@@ -761,7 +772,6 @@ def main(argv=None) -> int:
     else:
         cmd_file.write_text(json.dumps(current_params, indent=2, sort_keys=True) + "\n")
 
-    # --- wire up steps (later steps consume earlier steps' resolved-path callbacks) ---
     step_idx = step_seq_index(ctx)
     step_sa, seqaln_fn = step_self_align(ctx, args)
     step_ha, resolved_hicalns_fn = step_hic_align(ctx, args)
@@ -771,8 +781,7 @@ def main(argv=None) -> int:
     def run_yahs_fn() -> bool:
         if args.run_yahs is False:
             return False
-        have_hic = will_have_hic_fn()
-        return have_hic
+        return will_have_hic_fn()
 
     step_hs = step_hapscotch(ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec_fn, run_yahs_fn)
     step_yh = step_yahs_scaffold(ctx, args, resolved_hicbin_fn, run_yahs_fn)

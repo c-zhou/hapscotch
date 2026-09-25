@@ -4,7 +4,7 @@
 
 ## Overview
 
-HapScotch phases and scaffolds haplotypes in polyploid/multi-haplotype genome assemblies from all-vs-all sequence self-alignments, optionally refined with Hi-C data (contig error-correction and Hi-C guided rescaffolding via [YaHS](https://github.com/c-zhou/yahs)).
+HapScotch phases and scaffolds haplotypes in polyploid/multi-haplotype genome assemblies from all-vs-all sequence self-alignments, optionally refined with Hi-C data (contig error-correction and Hi-C guided scaffolding via [YaHS](https://github.com/c-zhou/yahs)).
 
 The repository builds five C programs, plus a Python script that runs the full pipeline end to end.
 
@@ -42,11 +42,11 @@ make install   # optionally installs all executables in ~/bin/
 
 If you already cloned without `--recurse-submodules`, run `git submodule update --init --recursive` first — this fetches the bundled [HiGHS](https://github.com/ERGO-Code/HiGHS) ILP solver used for Hi-C phasing.
 
-This builds `hapscotch`, `hapcure`, `hictools`, `seqtools`, and `hapcount`. It does **not** install the external pipeline tools (FastGA / minibwa / samtools / YaHS) — see the options below if you want everything set up in one step.
+This builds `hapscotch`, `hapcure`, `hictools`, `seqtools`, and `hapcount`. It does **not** install the external pipeline tools (FastGA / bwa-mem2 / minibwa / samtools / YaHS) — see the options below if you want everything set up in one step.
 
 ### Conda
 
-**Option A — build HapScotch as a conda package.** [`recipes/conda/`](recipes/conda/) is a `conda-build` recipe that pulls in FastGA/minibwa/samtools/YaHS as run dependencies, so a single build gives you everything:
+**Option A — build HapScotch as a conda package.** [`recipes/conda/`](recipes/conda/) is a `conda-build` recipe that pulls in FastGA/bwa-mem2/minibwa/samtools/YaHS as run dependencies, so a single build gives you everything:
 
 ```bash
 # create a conda environment with all tools
@@ -58,7 +58,7 @@ conda activate hapscotch
 run_pipeline.py --help
 ```
 
-**Option B — set up dependencies only, build HapScotch yourself.** [`recipes/environment.yml`](recipes/environment.yml) sets up the build toolchain plus FastGA/minibwa/samtools/YaHS and the Python packages used by `hicmap.py`:
+**Option B — set up dependencies only, build HapScotch yourself.** [`recipes/environment.yml`](recipes/environment.yml) sets up the build toolchain plus FastGA/bwa-mem2/minibwa/samtools/YaHS and the Python packages used by `hicmap.py`:
 
 ```bash
 # create a conda environment with all dependencies
@@ -75,7 +75,7 @@ python3 scripts/run_pipeline.py --help
 
 ### Docker / Singularity / Apptainer
 
-**Docker** — [`recipes/Dockerfile`](recipes/Dockerfile) builds an image with the full pipeline (all five binaries, `scripts/*.py`, and FastGA/minibwa/samtools/YaHS):
+**Docker** — [`recipes/Dockerfile`](recipes/Dockerfile) builds an image with the full pipeline (all five binaries, `scripts/*.py`, and FastGA/bwa-mem2/minibwa/samtools/YaHS):
 
 ```bash
 docker build -t hapscotch -f recipes/Dockerfile .
@@ -92,27 +92,29 @@ apptainer exec hapscotch.sif run_pipeline.py --help
 
 ## Running the pipeline
 
-The `scripts/run_pipeline.py` script runs the whole pipeline and is resumable:
+The `scripts/run_pipeline.py` script can be used to run the whole pipeline: (1) sequence self-alignment
+using `FastGA`, (2) Hi-C reads alignment using `bwa-mem2`/`minibwa`, (3) contig error correction based on Hi-C signal
+using `hapcure`, (4) haplotype binning/phasing using `hapscotch`, and (5) haplotype scaffolding using `YaHS`.
 
-| Flag | Effect |
-|---|---|
-| `--resume` | Resume from the failed step |
-| `--force-from STEP` | Force a rerun from a given step |
-| `--force` | Force a rerun from scratch |
+The `FastGA` and `bwa-mem2`/`minibwa` alignment steps could be computationally intensive, so it is highly recommended
+to run these steps separately in advance (in parallel) and pass the alignment results to the script using
+the `--seq-aln` and `--hic-aln` parameters.
+
 
 **Prerequisites:**
 - The five binaries above, either on `PATH` or pointed to with `--seqtools-bin` / `--hictools-bin` / `--hapscotch-bin` / `--hapcure-bin`
-- [YaHS](https://github.com/c-zhou/yahs) (`--yahs-bin`) — only needed for the Hi-C rescaffolding branch
-- [FastGA](https://github.com/thegenemyers/FASTGA) (`--fastga-bin`) — needed unless you already have self-alignments between sequences
-- [minibwa](https://github.com/lh3/minibwa) (`--minibwa-bin`) and [samtools](https://github.com/samtools/samtools) (`--samtools-bin`) — needed unless you already have Hi-C alignments
+- [YaHS](https://github.com/c-zhou/yahs) (`--yahs-bin`) — needed for Hi-C scaffolding
+- [FastGA](https://github.com/thegenemyers/FASTGA) (`--fastga-bin`) — needed for sequence self-alignments
+- [bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) (`--bwamem2-bin`) or [minibwa](https://github.com/lh3/minibwa) (`--minibwa-bin`) — needed for Hi-C alignments
+- [samtools](https://github.com/samtools/samtools) (`--samtools-bin`) — needed for Hi-C alignments
 
-**Basic usage (haploid / no Hi-C):**
+**Without Hi-C** (haplotype binning only):
 
 ```bash
 python3 scripts/run_pipeline.py -o OUTDIR genome.fa
 ```
 
-**With Hi-C data** (enables contig error-correction and, by default, the YaHS rescaffolding branch):
+**With Hi-C data** (enables contig error-correction and, by default, YaHS scaffolding):
 
 ```bash
 python3 scripts/run_pipeline.py -o OUTDIR --hic-aln hic.bam genome.fa
@@ -147,7 +149,7 @@ flowchart LR
 | 4 | `hic_convert` | `hictools convert` | Merged Hi-C BIN |
 | 5 | `contig_ec` | `hapcure` | Contig error-correction AGP |
 | 6 | `hapscotch` | `hapscotch` | Haplotype-phased scaffolds |
-| 7 | `yahs_scaffold` | `seqtools` / `yahs` / `hictools` / `hicmap.py` | Hi-C-rescaffolded haplotypes |
+| 7 | `yahs_scaffold` | `seqtools` / `yahs` / `hictools` / `hicmap.py` | Hi-C scaffolded haplotypes |
 | 8 | `collect_results` | – | Final files under `4.results/` |
 
 ### Final outputs
@@ -222,6 +224,24 @@ The `scripts/selfaln.py` script wraps this step for the end-to-end pipeline. Sin
 
 ```bash
 # index the genome
+bwa-mem2 index -p genome genome.fa
+
+# align hic reads in FASTQ format
+bwa-mem2 mem -t16 -5SP genome R1.fq.gz R2.fq.gz | \
+    samtools fixmate -mpu - - | \
+    samtools sort --write-index -l1 -o hic.srt.bam
+
+# mark duplicates
+samtools markdup --write-index -c -@16 hic.srt.bam hic.mkdup.bam
+
+# sort by read name
+samtools sort -N -@16 -o hic.bam hic.mkdup.bam
+```
+
+Or using `minibwa` instead of `bwa-mem2`:
+
+```bash
+# index the genome
 minibwa index -t4 genome.fa genome
 
 # align hic reads in FASTQ format
@@ -236,13 +256,17 @@ samtools markdup --write-index -c -@16 hic.srt.bam hic.mkdup.bam
 samtools sort -N -@16 -o hic.bam hic.mkdup.bam
 ```
 
-This is a minimal pipeline for aligning Hi-C reads with `minibwa`, implemented in `scripts/hicaln.py` (used by `scripts/run_pipeline.py`). There are many other Hi-C mapping pipelines you could use: [Arima Genomics](https://github.com/ArimaGenomics/mapping_pipeline), [Omni-C](https://omni-c.readthedocs.io/en/latest/), [HiC-Pro](https://github.com/nservant/HiC-Pro).
+This is a minimal pipeline for aligning Hi-C reads with `bwa-mem2`/`minibwa`, implemented in `scripts/hicaln.py` (used by `scripts/run_pipeline.py`). There are many other Hi-C mapping pipelines you could use: [Arima Genomics](https://github.com/ArimaGenomics/mapping_pipeline), [Omni-C](https://omni-c.readthedocs.io/en/latest/), [HiC-Pro](https://github.com/nservant/HiC-Pro).
 
 If you have multiple Hi-C libraries, repeat this — except for the genome index step — for each library, giving one BAM file per library.
 
-You can also give `minibwa` a single FASTQ file containing interleaved paired-end Hi-C reads or a `stdin` stream input. For example, if you have a name-sorted BAM/CRAM:
+You can also give `bwa-mem2`/`minibwa` a single FASTQ file containing interleaved paired-end Hi-C reads or a `stdin` stream input. For example, if you have a name-sorted BAM/CRAM:
 
 ```bash
+# using bwa-mem2 with '-p'
+samtools fasta -F0xB00 -n hic-in.bam | \
+    bwa-mem2 mem -5SP -p genome - | \
+# using minibwa
 samtools fasta -F0xB00 -n hic-in.bam | \
     minibwa map --hic -t16 genome - | \
     ...
@@ -279,7 +303,7 @@ Bins sequences into haplotype groups and builds longer scaffolds using sequence 
 
 The `-Y` option additionally writes `haps.grp-hic.bin`, used as input for YaHS scaffolding in the next step.
 
-### 7. (optional) Hi-C rescaffolding with YaHS
+### 7. (optional) Hi-C scaffolding with YaHS
 
 ```bash
 seqtools seq -o haps.bbseq.fa -a genome.fa haps.bbseq.agp

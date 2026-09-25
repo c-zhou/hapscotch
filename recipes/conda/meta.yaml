@@ -25,6 +25,7 @@ requirements:
     - matplotlib-base
     - samtools
     - fastga
+    - bwa-mem2
     - minibwa
     - yahs
 
@@ -36,7 +37,7 @@ test:
     - seqtools --help 2>&1 | grep -qi usage
     - hapcount --help 2>&1 | grep -qi usage
     - which run_pipeline.py selfaln.py hicaln.py hicmap.py
-    - which FastGA minibwa samtools yahs
+    - which FastGA bwa-mem2 minibwa samtools yahs
 
 about:
   home: https://github.com/c-zhou/hapscotch
@@ -49,8 +50,8 @@ about:
     refined with Hi-C data (contig error-correction and Hi-C-guided
     rescaffolding via YaHS). This package builds hapscotch, hapcure,
     hictools, seqtools and hapcount, plus the scripts/run_pipeline.py
-    driver, and pulls in FastGA, minibwa, samtools and YaHS as runtime
-    dependencies so the whole pipeline works out of the box.
+    driver, and pulls in FastGA, bwa-mem2, minibwa, samtools and YaHS as 
+    runtime dependencies so the whole pipeline works out of the box.
 
 extra:
   recipe-maintainers:

@@ -38,6 +38,8 @@
 
 #include "overlap.h"
 
+#undef DEBUG_ALN_GLOBAL_CHAIN
+
 int aln_coords_cmpfunc(const void *a, const void *b)
 { 
     int64  xm, ym;
@@ -785,10 +787,28 @@ int ovl_apos_cmpfunc(const void *a, const void *b)
     return (xm > ym) - (xm < ym);
 }
 
-
 static inline uint8 dual_ovl_type(uint8 type)
 {
     return ((type << 4) | (type >> 4)) & 0x77;
+}
+
+static inline ovl_frag_t *dual_ovl_frags(ovl_frag_t *frags, int nfrag)
+{
+    if (nfrag <= 0) return NULL;
+    
+    int i;
+    ovl_frag_t *dfrags;
+    MYMALLOC(dfrags, nfrag);
+    if (dfrags == NULL)
+        mem_alloc_error("dual_ovl_frags");
+    for (i = 0; i < nfrag; i++) {
+        dfrags[i].abpos = frags[i].bbpos;
+        dfrags[i].aepos = frags[i].bepos;
+        dfrags[i].bbpos = frags[i].abpos;
+        dfrags[i].bepos = frags[i].aepos;
+        dfrags[i].rev = frags[i].rev;
+    }
+    return dfrags;
 }
 
 ovl_t *add_dual_overlaps(ovl_t *ovls, int64 novl, int64 *_novl)
@@ -796,6 +816,7 @@ ovl_t *add_dual_overlaps(ovl_t *ovls, int64 novl, int64 *_novl)
     int64 i, n;
     uint8 type;
     ovl_t *ovl;
+    ovl_frag_t *dfrags;
 
     if (_novl) *_novl = novl;
     if (ovls == NULL || novl <= 0)
@@ -814,9 +835,10 @@ ovl_t *add_dual_overlaps(ovl_t *ovls, int64 novl, int64 *_novl)
     for (i = 0; i < n; i++) {
         ovl = &ovls[i];
         type = dual_ovl_type(ovl->type);
+        dfrags = dual_ovl_frags(ovl->frags, ovl->nfrag);
         ovls[n+i] = (ovl_t){ovl->bread, ovl->brev^1, ovl->aread, ovl->arev^1, 
             ovl->bbpos, ovl->bepos, ovl->abpos, ovl->aepos, ovl->blen, ovl->alen, 
-            type, ovl->del, ovl->neff, ovl->qual, ovl->score};
+            type, ovl->del, ovl->neff, ovl->qual, ovl->score, ovl->nfrag, dfrags};
     }
 
     *_novl = n*2;
@@ -1177,6 +1199,22 @@ static const double CHAIN_MIN_SCORE = 10000;
 static const double CHAIN_MIN_SS_RATIO = 0.1;
 static const double CHAIN_PGAP_SCALE_MACRO = 0.5;
 
+static const double LOG_MIN_CHAIN_FRAG_SIZE = 4.0; // log10(10000)
+static const double LOG_MAX_CHAIN_FRAG_SIZE = 6.0; // log10(1000000)
+static const double LOG_DIFF_CHAIN_FRAG_SIZE = LOG_MAX_CHAIN_FRAG_SIZE - LOG_MIN_CHAIN_FRAG_SIZE;
+static const double SCALE_FACTOR_CHAIN_FRAG_AT_MIN = .50;
+static const double SCALE_FACTOR_CHAIN_FRAG_AT_MAX = .10;
+static const double SCALE_FACTOR_CHAIN_FRAG_DIFF = SCALE_FACTOR_CHAIN_FRAG_AT_MAX - SCALE_FACTOR_CHAIN_FRAG_AT_MIN;
+static inline double chain_frag_size_scale_factor(double l)
+{
+    if (l <= 1.0) return SCALE_FACTOR_CHAIN_FRAG_AT_MIN;
+
+    double log_L = log10(l);
+    if (log_L <= LOG_MIN_CHAIN_FRAG_SIZE) return SCALE_FACTOR_CHAIN_FRAG_AT_MIN;
+    if (log_L >= LOG_MAX_CHAIN_FRAG_SIZE) return SCALE_FACTOR_CHAIN_FRAG_AT_MAX;
+    return SCALE_FACTOR_CHAIN_FRAG_AT_MIN + (log_L - LOG_MIN_CHAIN_FRAG_SIZE) / LOG_DIFF_CHAIN_FRAG_SIZE * SCALE_FACTOR_CHAIN_FRAG_DIFF;
+}
+
 static int alnb_abpos_cmpfunc(const void *a, const void *b)
 {
     int x = ((const alnb_t *)a)->abpos;
@@ -1252,6 +1290,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     ord_dbl_t *csort;
     ord_i32_t *psort, *p_fwd, *p_rev;
     aln_node_t *nodes, *node;
+    ovl_frag_t *frags;
     range_t *arngs, *brngs, *xrngs, *yrngs;
     uint64 *index;
     uint32 alen, blen;
@@ -1262,7 +1301,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     double dx_beg, dx_end, dy_beg, dy_end;
     double rab, rae, rbb, rbe, xlen, ylen;
     double l, u_x, u_y, max_s, max_l, sum_l, sum_l2;
-    int rev, narng, nbrng, nxrng, nyrng, nalnb, *sarray;
+    int rev, nfrag, narng, nbrng, nxrng, nyrng, nalnb, *sarray;
     int i, j, k, atop, fcnt, acnt, ccnt, pcnt, ovlap;
     
     data = &((chain_data_t *) _data)[tid];
@@ -1600,6 +1639,54 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
 
     // mark as a valid overlap to be retained
     ovl->del = 0;
+    
+    // populate fragments
+    // NB the fragments could be out-of-bounds
+    ovl->nfrag = 0;
+    ovl->frags = NULL;
+    nalnb = 0;
+    for (i = 0; i < pcnt; i++) {
+        node = nodes + csort[i].which;
+        a_beg = b_beg = INT32_MAX;
+        a_end = b_end = INT32_MIN;
+        rev = alns[node->which].rev;
+        while (node) {
+            aln = alns + node->which;
+            if (aln->abpos < a_beg) a_beg = aln->abpos;
+            if (aln->aepos > a_end) a_end = aln->aepos;
+            if (aln->bbpos < b_beg) b_beg = aln->bbpos;
+            if (aln->bepos > b_end) b_end = aln->bepos;
+            node = node->next;
+        }
+        alnbs[nalnb] = (alnb_t) {a_beg, a_end, b_beg, b_end, a_end-a_beg, b_end-b_beg};
+        psort[nalnb] = (ord_i32_t) {nalnb, (a_end-a_beg+b_end-b_beg)/2};
+        sarray[nalnb] = rev;
+        nalnb++;
+    }
+    qsort(psort, nalnb, sizeof(ord_i32_t), ord_i32_dcmpfunc);
+    max_l = psort[0].event * chain_frag_size_scale_factor(psort[0].event);
+    rev = sarray[psort[0].which];
+    for (i = 1; i < nalnb; i++) {
+        if (psort[i].event < max_l)
+            break;
+        rev += sarray[psort[i].which];
+    }
+    // we need at least two fragments with different orientations
+    if ((nfrag = i) > 1 && rev && (rev != nfrag)) {
+        MYMALLOC(frags, nfrag);
+        for (i = 0; i < nfrag; i++) {
+            k = psort[i].which;
+            frags[i] = (ovl_frag_t) {
+                alnbs[k].abpos,
+                alnbs[k].aepos,
+                alnbs[k].bbpos,
+                alnbs[k].bepos,
+                sarray[k]
+            };
+        }
+        ovl->frags = frags;
+        ovl->nfrag = nfrag;
+    }
 
     // check if there are more than one copy of the chain
     // to determine the overlap quality - the fraction of unique regions
@@ -1664,6 +1751,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
 
 #ifdef DEBUG_ALN_GLOBAL_CHAIN
     char *aname, *bname;
+    aln = alns + asort->which;
     aname = dicts->s[aln->aread].name;
     bname = dicts->s[aln->bread].name;
     for (i = 0; i < pcnt; i++) {

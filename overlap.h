@@ -33,20 +33,6 @@
 #include "kvec.h"
 #include "sdict.h"
 
-// debug tags shared with the ploidy and hap modules
-#undef DEBUG_ALN_GLOBAL_CHAIN
-#undef DEBUG_GENOME_COV_HIST
-#undef DEBUG_GENOME_COV_DEPTH
-#undef DEBUG_SV_DETECTION
-#undef DEBUG_HIC_LINKAGE
-#undef DEBUG_HIC_LINKAGE_GROUP
-#undef DEBUG_SCAFFOLD_PARTITION
-#undef DEBUG_SCAFFOLD_GROUP_MERGE
-#undef DEBUG_HAPLOTYPE_PARTITION
-#undef DEBUG_REFINE_HAP_PARTITION
-#undef DEBUG_HAPLOTYPE_SORTING
-#undef DEBUG_HAPLOTYPE_PHASE
-
 enum DEBUG_TAG {
     PG_GLOBAL = 'G',
     PG_HIST   = 'H',
@@ -99,6 +85,12 @@ typedef kvec_t(range_t) range_vec_t;
 #define OVL_REPT 0x08  // 00001000   repeat matches
 
 typedef struct {
+    int abpos, aepos;
+    int bbpos, bepos;
+    uint8 rev;
+} ovl_frag_t;
+
+typedef struct {
     uint32 aread:31, arev:1;
     uint32 bread:31, brev:1;
     int abpos, aepos;
@@ -106,6 +98,8 @@ typedef struct {
     int alen, blen;
     uint8 type:7, del:1;
     double neff, qual, score;
+    int nfrag;
+    ovl_frag_t *frags;
 } ovl_t;
 
 typedef struct {

@@ -35,6 +35,9 @@
 
 #include "ploidy.h"
 
+#undef DEBUG_GENOME_COV_HIST
+#undef DEBUG_GENOME_COV_DEPTH
+
 // upper limit of genome ploidy number to consider, settable via -P/--max-ploidy
 int MAX_PLOIDY_NUMBER = 16;
 

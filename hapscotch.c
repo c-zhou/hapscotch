@@ -354,11 +354,22 @@ int main(int argc, char *argv[])
 #ifdef DEBUG_PRINT_OVERLAP
     for (i = 0; i < dicts->n; i++)
         printf("S\t%s\t%d\n", dicts->s[i].name, dicts->s[i].len);
-    for (i = 0; i < novl; i++)
-        printf("O\t%s\t%d\t%d\t%s\t%d\t%d\t%.3f\t%.3f\t%.3f\n", 
-            dicts->s[ovls[i].aread].name, ovls[i].abpos, ovls[i].aepos, 
-            dicts->s[ovls[i].bread].name, ovls[i].bbpos, ovls[i].bepos,
-            ovls[i].neff, ovls[i].score, ovls[i].qual);
+    for (i = 0; i < novl; i++) {
+        ovl_t *ovl = ovls + i;
+        int j, nfrag = ovl->nfrag;
+        printf("O\t%s\t%d\t%d\t%s\t%d\t%d\t%c\t%.3f\t%.3f\t%.3f\n", 
+            dicts->s[ovl->aread].name, ovl->abpos, ovl->aepos, 
+            dicts->s[ovl->bread].name, ovl->bbpos, ovl->bepos,
+            "+-"[ovl->arev != ovl->brev],
+            ovl->neff, ovl->score, ovl->qual);
+        for (j = 0; j < nfrag; j++) {
+            ovl_frag_t *frg = ovl->frags + j;
+            printf("F\t%s\t%d\t%d\t%s\t%d\t%d\t%c\n", 
+                dicts->s[ovl->aread].name, frg->abpos, frg->aepos, 
+                dicts->s[ovl->bread].name, frg->bbpos, frg->bepos,
+                "+-"[frg->rev]);
+        }
+    }
 #endif
 
     // estimate ploidy number if not specified
@@ -393,6 +404,8 @@ int main(int argc, char *argv[])
     for (i = 0; i < nscf; i++) 
         scf_free(scfs+i);
     free(scfs);
+    for (i = 0; i < novl; i++)
+        free(ovls[i].frags);
     free(ovls);
     free(hic_bfile);
     sd_destroy(dicts);

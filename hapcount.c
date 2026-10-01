@@ -67,7 +67,7 @@ int main(int argc, char *argv[])
     aln_t *alns;
     ovl_t *ovls;
     busco_table_t *buscos;
-    int64 naln, novl;
+    int64 i, naln, novl;
     int ploidy_num, dual_aln;
     char *busco_file, *agp_file;
     
@@ -195,6 +195,8 @@ strerror(errno));
     // write output
     fprintf(stdout, "Ploidy\t%d\n", ploidy_num);
     
+    for (i = 0; i < novl; i++)
+        free(ovls[i].frags);
     free(ovls);
     sd_destroy(dicts);
     if (break_dict) {

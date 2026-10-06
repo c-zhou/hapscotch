@@ -136,7 +136,9 @@ static void dump_links_from_bam_file(const char *f, sdict_t *dict, const char *o
     fwrite(&pair_c, sizeof(uint64), 1, fo);
 
     while (bam_read1(fp, b) >= 0 ) {
-        ++rec_c;
+        if (rec_c % REPORT_EPOC == 0 && rec_c)
+            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
+        rec_c++;
 
         if (buff == 0) {
             q0 = 255;
@@ -207,9 +209,6 @@ static void dump_links_from_bam_file(const char *f, sdict_t *dict, const char *o
                 buff = 1;
             }
         }
-
-        if (rec_c % REPORT_EPOC == 0)
-            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
     }
 
     if (dbuff > bbuff)
@@ -301,7 +300,9 @@ static void dump_links_from_bed_file(const char *f, sdict_t *dict, const char *o
         if (is_empty_line(line) || parse_line(line, fields, 5) < 5)
             continue;
         
-        ++rec_c;
+        if (rec_c % REPORT_EPOC == 0 && rec_c)
+            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
+        rec_c++;
 
         if (buff == 0) {
             cname->l = 0, kputs(fields[0], cname);
@@ -368,9 +369,6 @@ static void dump_links_from_bed_file(const char *f, sdict_t *dict, const char *o
                 buff = 1;
             }
         }
-
-        if (rec_c % REPORT_EPOC == 0)
-            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
     }
 
     if (dbuff > bbuff)
@@ -442,7 +440,9 @@ static void dump_links_from_pa5_file(const char *f, sdict_t *dict, int read_len,
         if (is_empty_line(line) || parse_line(line, fields, 7) < 7)
             continue;
 
-        ++rec_c;
+        if (rec_c % REPORT_EPOC == 0 && rec_c)
+            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
+        rec_c++;
 
         *i0 = sd_get(dict, fields[1]);
         *i1 = sd_get(dict, fields[3]);
@@ -495,9 +495,6 @@ static void dump_links_from_pa5_file(const char *f, sdict_t *dict, int read_len,
 
             ++pair_c;
         }
-
-        if (rec_c % REPORT_EPOC == 0)
-            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
     }
 
     if (dbuff > bbuff)
@@ -585,6 +582,10 @@ static void dump_links_from_one_file(const char *f, sdict_t *dict, const char *o
 
     while ((lineType = oneReadLine(fp)) && lineType != 'S');
     while (lineType) {
+        if (rec_c % REPORT_EPOC == 0 && rec_c)
+            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
+        rec_c++;
+
         if (buff == 0) {
             r0 = oneInt(fp, 0);
             *i0 = UINT32_MAX;
@@ -655,9 +656,6 @@ static void dump_links_from_one_file(const char *f, sdict_t *dict, const char *o
                 *i0 = *i1;
             }
         }
-
-        if (++rec_c % REPORT_EPOC == 0)
-            fprintf(stderr, "[M::%s] %llu million records processed, %llu read pairs\n", __func__, rec_c / 1000000, pair_c);
     }
 
     if (dbuff > bbuff)

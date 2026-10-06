@@ -1045,7 +1045,7 @@ static void print_help_hiclink(FILE *fp_help)
     fprintf(fp_help, "Usage: hictools hiclink [options] <hic.[bed|bam|pa5|1map|bin]> <scaffolds.agp> <contigs.fa.[fai|idx]>\n");
     fprintf(fp_help, "Options:\n");
     fprintf(fp_help, "    -a             preprocess for assembly mode\n");
-    fprintf(fp_help, "    -q INT         minimum mapping quality [10]\n");
+    fprintf(fp_help, "    -q INT         minimum mapping quality [0]\n");
     fprintf(fp_help, "    -o STR         output file prefix (required for '-a' mode) [stdout]\n");
     fprintf(fp_help, "    -f STR         input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
     fprintf(fp_help, "    -h, --help     print this help\n");
@@ -1077,7 +1077,7 @@ static int main_hiclink(int argc, char *argv[])
     int c, ret;
     FILE *fp_help = stderr;
     fai = agp = agp1 = link_file = out = out1 = annot = lift = 0;
-    mq = 10;
+    mq = 0;
     asm_mode = 0;
     f_type = NOSET;
 

@@ -40,6 +40,8 @@ ec_conf_t ec_conf = {
     .med_drop = .3,
     .rec_rate = .8,
     .p_thresh = .01,
+    .pal_size = 100000,
+    .pal_dens = 0.8
 };
 
 /* Interface for DynamicPercentile */
@@ -467,6 +469,50 @@ ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall)
 
     *_ncall = calls->n;
     return calls->a;
+}
+
+ec_pos_t *ec_merge_calls(ec_pos_t *calls, int ncall, sdict_t *dicts, int *_ncall)
+{
+    if (!calls || !ncall)
+        return calls;
+    
+    // sort by sequence and position
+    qsort(calls, ncall, sizeof(ec_pos_t), ec_pos_cmpfunc);
+
+    // merge redundant calls respecting ec_conf.min_frag
+    int i, j, k, n, s, min_frag = ec_conf.min_frag;
+    uint32 b, e;
+
+    s = calls[0].seq;
+    n = 0;
+    b = 0;
+    e = dicts->s[s].len;
+    for (i = 1, j = 0; i <= ncall; i++) {
+        if (i == ncall || 
+            calls[i].seq != s || 
+            calls[i].pos >= calls[i-1].pos + min_frag) {
+            calls[n] = calls[j];
+            for (k = j+1; k < i; k++)
+                if (calls[k].pval < calls[n].pval)
+                    calls[n] = calls[k];
+            if (calls[n].pos >= b + min_frag && 
+                calls[n].pos + min_frag <= e) {
+                b = calls[n].pos;
+                n++;
+            }
+            if (i != ncall) {
+                if (s != calls[i].seq) {
+                    s = calls[i].seq;
+                    b = 0;
+                    e = dicts->s[s].len;
+                }
+                j = i;
+            }
+        }
+    }
+    if (_ncall) *_ncall = n;
+
+    return calls;
 }
 
 void ec_write_report(ec_pos_t *calls, int ncall, sdict_t *dicts, FILE *fo)

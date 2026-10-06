@@ -34,6 +34,8 @@ typedef struct {
     double med_drop;
     double rec_rate;
     double p_thresh;
+    int pal_size;
+    double pal_dens;
 } ec_conf_t;
 
 typedef struct {
@@ -50,6 +52,7 @@ extern "C" {
 #endif
 
 ec_pos_t *ec_call_breaks(hic_t *hics, int64 nhic, sdict_t *dicts, int *_ncall);
+ec_pos_t *ec_merge_calls(ec_pos_t *calls, int ncall, sdict_t *dicts, int *_ncall);
 void ec_write_report(ec_pos_t *calls, int ncall, sdict_t *dicts, FILE *fo);
 void ec_write_agp(ec_pos_t *calls, int ncall, sdict_t *dicts, FILE *fo);
 

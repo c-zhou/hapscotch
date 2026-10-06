@@ -1368,6 +1368,10 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
         nodes[i].type = 0;
     }
 
+    // mark all alignments as deleted
+    for (i = 0; i < acnt; i++)
+        alns[asort[i].which].top = 0;
+
     // forward and reverse chaining
     build_global_chain_pgap(nodes, fcnt, psort, CHAIN_PGAP_SCALE);
     build_global_chain_pgap(nodes + fcnt, atop - fcnt, psort, CHAIN_PGAP_SCALE);
@@ -1375,7 +1379,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     // pop global alignment chains
     pop_chain(nodes, atop, csort);
     ccnt = collect_chain(nodes, atop, csort);
-    if (!ccnt) goto delete_all;
+    if (!ccnt) return;
 
     // filter by score
     max_s = nodes[csort[0].which].score;
@@ -1386,7 +1390,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
             break;
     }
     ccnt = i;
-    if (!ccnt) goto delete_all;
+    if (!ccnt) return;
 
     // greedy selection of primary chains
     // chains largely covered by primary chains are secondary chains
@@ -1425,8 +1429,8 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     nalnb = 0;
     for (i = 0; i < pcnt; i++) {
         node = nodes + csort[i].which;
-        a_beg = b_beg = INT32_MAX;
-        a_end = b_end = INT32_MIN;
+        a_beg = b_beg =  DBL_MAX;
+        a_end = b_end = -DBL_MAX;
         while (node) {
             aln = alns + node->which;
             if (aln->abpos < a_beg) a_beg = aln->abpos;
@@ -1458,8 +1462,8 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     // delete chains that are out of the final x and y ranges
     for (i = 0; i < pcnt; i++) {
         node = nodes + csort[i].which;
-        a_beg = b_beg = INT32_MAX;
-        a_end = b_end = INT32_MIN;
+        a_beg = b_beg =  DBL_MAX;
+        a_end = b_end = -DBL_MAX;
         while (node) {
             aln = alns + node->which;
             if (aln->abpos < a_beg) a_beg = aln->abpos;
@@ -1544,13 +1548,11 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     if (a_end - a_beg < b_end - b_beg) {
         mlen = a_end - a_beg;
         mlen *= chain_size_scale_factor(mlen);
-        if (x_end - x_beg < mlen)
-            goto delete_all;
+        if (x_end - x_beg < mlen) return;
     } else {
         mlen = b_end - b_beg;
         mlen *= chain_size_scale_factor(mlen);
-        if (y_end - y_beg < mlen)
-            goto delete_all;
+        if (y_end - y_beg < mlen) return;
     }
 
     // decide if to use the extended boundary for the final syntenic region
@@ -1633,7 +1635,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
         }
         if (k == 1 && alns[j].mlen < MIN(alen, blen) * SINGLETON_MIN_OVL_FRAC) {
             ovl->del = 1; // mark as deleted
-            goto delete_all;
+            return;
         }
     }
 
@@ -1647,8 +1649,8 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
     nalnb = 0;
     for (i = 0; i < pcnt; i++) {
         node = nodes + csort[i].which;
-        a_beg = b_beg = INT32_MAX;
-        a_end = b_end = INT32_MIN;
+        a_beg = b_beg =  DBL_MAX;
+        a_end = b_end = -DBL_MAX;
         rev = alns[node->which].rev;
         while (node) {
             aln = alns + node->which;
@@ -1696,8 +1698,8 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
         if (node->type == HEAD) // this is primary chain
             continue;
         rev = alns[node->which].rev;
-        a_beg = b_beg = INT32_MAX;
-        a_end = b_end = INT32_MIN;
+        a_beg = b_beg =  DBL_MAX;
+        a_end = b_end = -DBL_MAX;
         while (node) {
             aln = alns + node->which;
             if (aln->abpos < a_beg) a_beg = aln->abpos;
@@ -1705,7 +1707,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
             if (aln->bbpos < b_beg) b_beg = aln->bbpos;
             if (aln->bepos > b_end) b_end = aln->bepos;
             node = node->next;
-        }
+        }        
         find_overlaps_axis(ovl->abpos, ovl->aepos, ovl->bbpos, ovl->bepos,
             a_beg, a_end, b_beg, b_end, rev, xrngs, &nxrng);
         find_overlaps_axis(ovl->bbpos, ovl->bepos, ovl->abpos, ovl->aepos,
@@ -1727,8 +1729,7 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
             aln = alns + node->which;
             arngs[narng++] = (range_t) {aln->abpos, aln->aepos};
             brngs[nbrng++] = (range_t) {aln->bbpos, aln->bepos};
-            l = alns[node->which].mlen;
-            if (l > max_l) max_l = l;
+            if (max_l < aln->mlen) max_l = aln->mlen;
             node = node->next;
         }
     }
@@ -1748,6 +1749,17 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
         }
     }
     ovl->neff = sum_l * sum_l / sum_l2;
+
+    // restore alignments in the adaptive chains
+    for (i = 0; i < pcnt; i++) {
+        node = nodes + csort[i].which;
+        if (node->type != HEAD)
+            continue;
+        while (node) {
+            alns[node->which].top = 1;
+            node = node->next;
+        }
+    }
 
 #ifdef DEBUG_ALN_GLOBAL_CHAIN
     char *aname, *bname;
@@ -1778,12 +1790,6 @@ static void build_adaptive_chain_core(void *_data, long jid, int tid)
 #endif
 
     return;
-
-delete_all:
-    // mark all alignments as deleted
-    for (i = 0; i < acnt; i++)
-        alns[asort[i].which].top = 0;
-    return;
 }
 
 static inline int number_alns(aln_t *aln)
@@ -1799,7 +1805,10 @@ static inline int number_alns(aln_t *aln)
 
 ovl_t *build_adaptive_chains(aln_t *alns, int64 naln, sdict_t *dicts, int n_threads, int64 *_naln, int64 *_novl)
 {
-    if (naln <= 0) return NULL;
+    if (_naln) *_naln = 0;
+    if (_novl) *_novl = 0;
+    if (alns == NULL || naln <= 0) 
+        return NULL;
     
     int64 i, j, m, max, ntop;
     uint64 read;
@@ -1915,6 +1924,379 @@ ovl_t *build_adaptive_chains(aln_t *alns, int64 naln, sdict_t *dicts, int n_thre
     free(order);
 
     return ovls;
+}
+
+#define PALIN_MAX_DIFF .1
+#define PALIN_MIN_QUAL .5
+#define PALIN_MIN_NEFF  6
+
+static void aln_find_palindrome_core(void *_data, long jid, int tid)
+{
+    chain_data_t *data;
+    aln_t *alns, *aln;
+    ovl_t *ovl;
+    sdict_t *dicts;
+    ord_u64_t *asort;
+    ord_dbl_t *csort;
+    ord_i32_t *psort;
+    aln_node_t *nodes, *node;
+    range_t *arngs, *brngs, *xrngs, *yrngs;
+    uint64 *index;
+    uint32 alen, blen;
+    double x_len, y_len;
+    double x_beg, x_end, y_beg, y_end;
+    double a_beg, a_end, b_beg, b_end;
+    double l, u_x, u_y, mlen, max_s, max_l, sum_l, sum_l2;
+    int narng, nbrng, nxrng, nyrng;
+    int i, atop, fcnt, acnt, ccnt, ovlap;
+    
+    data = &((chain_data_t *) _data)[tid];
+    alns = data->alns;
+    dicts = data->dicts;
+    asort = data->asort;
+    csort = data->csort;
+    psort = data->psort;
+    nodes = data->nodes;
+    index = data->index;
+    arngs = data->arngs;
+    brngs = data->brngs;
+    xrngs = data->xrngs;
+    yrngs = data->yrngs;
+    
+    asort += (index[jid] >> 32);
+    acnt = (uint32) index[jid];
+    alen = dicts->s[asort->event >> 32].len; // aread length
+    blen = dicts->s[(uint32) asort->event >> 1].len; // bread length
+
+    // set overlap as deleted
+    ovl = data->ovls + jid;
+    ovl->del = 1; // mark all overlaps as deleted
+
+    // global chaining with Splay tree
+    // initiate splay tree nodes
+    // make tree nodes
+    atop = fcnt = 0;
+    for (i = 0; i < acnt; i++) {
+        aln = alns + asort[i].which;
+        if (!aln->top) continue;
+        
+        node = nodes + atop++;
+        MYBZERO(node, 1);
+
+        node->abpos = aln->abpos;
+        node->aepos = aln->aepos;
+        if (aln->rev) {
+            node->bbpos = blen - aln->bepos;
+            node->bepos = blen - aln->bbpos;
+        } else {
+            node->bbpos = aln->bbpos;
+            node->bepos = aln->bepos;
+            fcnt++;
+        }
+        node->alen  = aln->aepos - aln->abpos + aln->bepos - aln->bbpos;
+        node->score = node->alen;
+        node->which = asort[i].which;
+
+        ovlap = (int) ((nodes[i].aepos - nodes[i].abpos) * ALIGN_OVERLAP_FRAC + .499);
+        if (ovlap > ALIGN_OVERLAP_BASE) ovlap = ALIGN_OVERLAP_BASE;
+        nodes[i].aepos -= ovlap;
+        ovlap = (int) ((nodes[i].bepos - nodes[i].bbpos) * ALIGN_OVERLAP_FRAC + .499);
+        if (ovlap > ALIGN_OVERLAP_BASE) ovlap = ALIGN_OVERLAP_BASE;
+        nodes[i].bepos -= ovlap;
+        
+        nodes[i].L = NULL;
+        nodes[i].R = NULL;
+        nodes[i].next = NULL;
+
+        nodes[i].clen = 1;
+        nodes[i].type = 0;
+    }
+
+    // mark all alignments as deleted
+    for (i = 0; i < acnt; i++)
+        alns[asort[i].which].top = 0;
+
+    // forward and reverse chaining
+    build_global_chain_pgap(nodes, fcnt, psort, CHAIN_PGAP_SCALE);
+    build_global_chain_pgap(nodes + fcnt, atop - fcnt, psort, CHAIN_PGAP_SCALE);
+
+    // pop global alignment chains
+    pop_chain(nodes, atop, csort);
+    ccnt = collect_chain(nodes, atop, csort);
+    if (!ccnt) return;
+
+    // filter by score
+    max_s = nodes[csort[0].which].score;
+    for (i = 0; i < ccnt; i++) {
+        node = nodes + csort[i].which;
+        if (node->score < CHAIN_MIN_SCORE ||
+            node->score < max_s * CHAIN_MIN_SS_RATIO)
+            break;
+    }
+    ccnt = i;
+    if (!ccnt) return;
+
+    // only keep the first as primary chain
+    // make secondary chains deleted
+    for (i = 1; i < ccnt; i++)
+        nodes[csort[i].which].type = DELT;
+
+    // collect bounding boxes of the chain
+    a_beg = b_beg =  DBL_MAX;
+    a_end = b_end = -DBL_MAX;
+    node = nodes + csort->which;
+    while (node) {
+        aln = alns + node->which;
+        if (aln->abpos < a_beg) a_beg = aln->abpos;
+        if (aln->aepos > a_end) a_end = aln->aepos;
+        if (aln->bbpos < b_beg) b_beg = aln->bbpos;
+        if (aln->bepos > b_end) b_end = aln->bepos;
+        node = node->next;
+    }
+
+    // used extended boundaries for the final syntenic region
+    x_beg = a_beg; x_end = a_end;
+    y_beg = b_beg; y_end = b_end;    
+    extend_overlap(a_beg, a_end, b_beg, b_end, alen, blen, 1, &x_beg, &x_end, &y_beg, &y_end);
+
+    // allow a maximum overhang of 10% at both ends
+    mlen = a_end - a_beg;
+    if (a_beg - x_beg > mlen * MAX_OVL_OVERHANG_FRAC ||
+        x_end - a_end > mlen * MAX_OVL_OVERHANG_FRAC)
+        return;
+    mlen = b_end - b_beg;
+    if (b_beg - y_beg > mlen * MAX_OVL_OVERHANG_FRAC ||
+        y_end - b_end > mlen * MAX_OVL_OVERHANG_FRAC)
+        return;
+    
+    // check if the alignment difference
+    x_len = x_end - x_beg;
+    y_len = y_end - y_beg;
+    mlen = fabs(x_len - y_len);
+
+    if (mlen / MIN(x_len, y_len) > PALIN_MAX_DIFF)
+        return;
+
+    // check if there are more than one copy of the chain
+    // to determine the overlap quality - the fraction of unique regions
+    nxrng = nyrng = 0;
+    for (i = 0; i < ccnt; i++) {
+        node = nodes + csort[i].which;
+        if (node->type == HEAD) // this is primary chain
+            continue;
+        a_beg = b_beg =  DBL_MAX;
+        a_end = b_end = -DBL_MAX;
+        while (node) {
+            aln = alns + node->which;
+            if (aln->abpos < a_beg) a_beg = aln->abpos;
+            if (aln->aepos > a_end) a_end = aln->aepos;
+            if (aln->bbpos < b_beg) b_beg = aln->bbpos;
+            if (aln->bepos > b_end) b_end = aln->bepos;
+            node = node->next;
+        }
+        if (a_beg < x_beg) a_beg = x_beg;
+        if (a_end > x_end) a_end = x_end;
+        if (b_beg < y_beg) b_beg = y_beg;
+        if (b_end > y_end) b_end = y_end;
+        if (a_beg < a_end) xrngs[nxrng++] = (range_t) {a_beg, a_end};
+        if (b_beg < b_end) yrngs[nyrng++] = (range_t) {b_beg, b_end};
+    }
+    u_x = 1.0 - (double) rangelist_size(xrngs, nxrng, 0) / (x_len + 1e-6);
+    u_y = 1.0 - (double) rangelist_size(yrngs, nyrng, 0) / (y_len + 1e-6);
+    ovl->qual = MIN(u_x, u_y);
+
+    if (ovl->qual < PALIN_MIN_QUAL)
+        return;
+
+    // score the overlap by the total length of aligned regions in the syntenic region
+    // cacluate the effective number of alignments
+    max_l = .0;
+    node = nodes + csort->which;
+    narng = nbrng = 0;
+    while (node) {
+        aln = alns + node->which;
+        arngs[narng++] = (range_t) {aln->abpos, aln->aepos};
+        brngs[nbrng++] = (range_t) {aln->bbpos, aln->bepos};
+        if (max_l < aln->mlen) max_l = aln->mlen;
+        node = node->next;
+    }
+    ovl->score = rangelist_size(arngs, narng, 0) / 2.0 + rangelist_size(brngs, nbrng, 0) / 2.0;
+
+    // effective number of alignments
+    sum_l = sum_l2 = .0;
+    node = nodes + csort->which;
+    while (node) {
+        l = alns[node->which].mlen;
+        sum_l += l / max_l;
+        l /= max_l;
+        sum_l2 += l * l;
+        node = node->next;
+    }
+    ovl->neff = sum_l * sum_l / sum_l2;
+
+    if (ovl->neff < PALIN_MIN_NEFF) return;
+
+    // mark a retained overlap
+    ovl->aread = asort->event >> 32;
+    ovl->bread = (uint32) asort->event >> 1;
+    ovl->abpos = (uint32) x_beg;
+    ovl->aepos = (uint32) x_end;
+    ovl->bbpos = (uint32) y_beg;
+    ovl->bepos = (uint32) y_end;
+    ovl->alen  = (uint32) x_len;
+    ovl->blen  = (uint32) y_len;
+    ovl->arev  = 0;
+    ovl->brev  = 1;
+    ovl->type  = 0;
+    ovl->nfrag = 0;
+    ovl->frags = NULL;
+    ovl->del   = 0;
+
+    // restore alignments in the adaptive chains
+    node = nodes + csort->which;
+    while (node) {
+        alns[node->which].top = 1;
+        node = node->next;
+    }
+
+    return;
+}
+
+static inline double log10_scale_factor(double s, double s_log_min, double s_log_max, double f_at_min, double f_at_max)
+{
+    if (s <= 1.0) return f_at_min;
+    double log_s = log10(s);
+    if (log_s <= s_log_min) return f_at_min;
+    if (log_s >= s_log_max) return f_at_max;
+    return f_at_min + (log_s - s_log_min) / (s_log_max - s_log_min) * (f_at_max - f_at_min);
+}
+
+uint64 *aln_find_palindromes(aln_t *alns, int64 naln, sdict_t *dicts, int min_size, double min_dens, int n_threads, int *_npali)
+{
+    if (_npali) *_npali = 0;
+    if (alns == NULL || naln <= 0)
+        return NULL;
+
+    int64 i, j, m, max, nseq, ntop;
+    uint64 *index, *palis, read;
+    ovl_t *ovls, *ovl;
+    aln_t *aln;
+    ord_u64_t *order;
+    chain_data_t *data;
+    double s_log_min, s_log_max, f_at_min, f_at_max, mlen;
+    int npali;
+
+    // number of sequences
+    nseq = dicts->n;
+
+    // order alignments by aread, bread, strand
+    MYMALLOC(order, naln);
+    MYMALLOC(palis, nseq);
+    if (order == NULL || palis == NULL)
+        mem_alloc_error("palindrome arrays");
+    ntop = 0;
+    for (i = 0; i < naln; i++) {
+        aln = alns + i;
+        if (!aln->top || aln->aread != aln->bread || !aln->rev) continue;
+        order[ntop].which = i;
+        order[ntop].event = ((uint64) aln->aread << 32) | ((uint32) aln->bread << 1 | aln->rev);
+        ntop++;
+    }
+    qsort(order, ntop, sizeof(ord_u64_t), ord_u64_acmpfunc);
+
+    if (!ntop) {
+        fprintf(stderr, "[W::%s] no alignments for palindrome detection\n", __func__);
+        free(order);
+        return NULL;
+    }
+
+    // build order indices
+    MYCALLOC(index, nseq);
+    max = 0;
+    j = 0;
+    read = order[j].event >> 32;
+    m = 0;
+    for (i = 0; i < ntop; i++) {
+        if (read != (order[i].event >> 32)) {
+            index[read] = (uint64) j << 32 | (i - j);
+            if (m > max) max = m;
+            j = i;
+            read = order[j].event >> 32;
+            m = 0;
+        }
+        m += number_alns(alns + order[i].which);
+    }
+    index[read] = (uint64) j << 32 | (i - j);
+    if (m > max) max = m;
+
+    MYCALLOC(ovls, nseq);
+    if (ovls == NULL)
+        mem_alloc_error("overlap array");
+
+    // pre-allocate spaces need for core chaining algorithm
+    MYCALLOC(data, n_threads);
+    if (data == NULL)
+        mem_alloc_error("chain data array");
+    for (i = 0; i < n_threads; i++) {
+        data[i].alns = alns;
+        data[i].ovls = ovls;
+        data[i].dicts = dicts;
+        data[i].asort = order;
+        data[i].index = index;
+        MYMALLOC(data[i].psort, max*2);
+        MYMALLOC(data[i].csort, max);
+        MYMALLOC(data[i].nodes, max);
+        MYMALLOC(data[i].arngs, max);
+        MYMALLOC(data[i].brngs, max);
+        MYMALLOC(data[i].xrngs, max*2); // double size for inplace merge
+        MYMALLOC(data[i].yrngs, max*2); // double size for inplace merge
+        if (data[i].csort == NULL || data[i].psort == NULL || data[i].nodes == NULL ||
+            data[i].arngs == NULL || data[i].brngs == NULL || data[i].xrngs == NULL || 
+            data[i].yrngs == NULL)
+            mem_alloc_error("chain data prealloc space");
+    }
+
+    // kt_for
+    kt_for(n_threads, aln_find_palindrome_core, data, nseq);
+
+    // set score filter
+    s_log_min = log10(min_size);
+    s_log_max = 1. + s_log_min;
+    f_at_min = min_dens;
+    f_at_max = min_dens / 2.;
+
+    // collect results
+    npali = 0;
+    for (i = 0; i < nseq; i++) {
+        ovl = ovls + i;
+        if (ovl->del)
+            continue;
+        mlen = (ovl->alen + ovl->blen) / 2.;
+        if (mlen < min_size ||
+            ovl->score < mlen * log10_scale_factor(mlen, s_log_min, s_log_max, f_at_min, f_at_max))
+            continue;
+        palis[npali++] = (uint64) i << 32 | (ovl->abpos/4 + ovl->bbpos/4 + ovl->aepos/4 + ovl->bepos/4);
+    }
+    fprintf(stderr, "[M::%s] found %d palindromes\n", __func__, npali);
+
+    free(index);
+    for (i = 0; i < n_threads; i++) {
+        free(data[i].csort);
+        free(data[i].psort);
+        free(data[i].nodes);
+        free(data[i].alnbs);
+        free(data[i].arngs);
+        free(data[i].brngs);
+        free(data[i].xrngs);
+        free(data[i].yrngs);
+    }
+    free(data);
+    free(ovls);
+    free(order);
+
+    if (_npali)
+        *_npali = npali;
+    return palis;
 }
 
 /****************** END Glocal Chaining *******************/

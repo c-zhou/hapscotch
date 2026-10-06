@@ -149,6 +149,9 @@ int merge_range_fuzzy(range_t *ranges, int n, int fz, int sorted);
 
 int ovl_abseqs_cmpfunc(const void *a, const void *b);
 int ovl_apos_cmpfunc(const void *a, const void *b);
+
+uint64 *aln_find_palindromes(aln_t *alns, int64 naln, sdict_t *dicts, int min_size, double min_dens, int n_threads, int *_npali);
+
 ovl_t *add_dual_overlaps(ovl_t *ovls, int64 novl, int64 *_novl);
 ovl_t *build_adaptive_chains(aln_t *alns, int64 naln, sdict_t *dicts, int n_threads, int64 *_naln, int64 *_novl);
 

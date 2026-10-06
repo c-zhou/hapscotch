@@ -165,7 +165,7 @@ strerror(errno));
 
     // read PAF files
     naln = 0;
-    alns = read_pafs(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, &naln);
+    alns = read_pafs(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, 0, &naln);
     
     // sort by aread, abpos, aepos
     qsort(alns, naln, sizeof(aln_t), aln_coords_cmpfunc);

@@ -395,7 +395,7 @@ def step_hic_convert(ctx: Ctx, resolved_hicalns_fn) -> tuple:
                 applicable=_applicable), _resolved_hicbin, _will_have_hic
 
 
-def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn) -> tuple:
+def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn, seqaln_fn) -> tuple:
     out = ctx.hapcure_dir / "ctg.ec.agp"
 
     def _applicable() -> bool:
@@ -404,8 +404,11 @@ def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn) -> tupl
     def _run():
         ctx.hapcure_dir.mkdir(parents=True, exist_ok=True)
         run_cmd(
-            [ctx.hapcure_bin] + _parse_opts(args.hapcure_opt) + ["-o", str(ctx.hapcure_dir / "ctg"),
-             str(ctx.idxfile), str(resolved_hicbin_fn())],
+            [ctx.hapcure_bin] + _parse_opts(args.hapcure_opt) +
+            ["-a", str(seqaln_fn())] +
+            ["-t", str(ctx.threads)] +
+            ["-o", str(ctx.hapcure_dir / "ctg")] +
+            [str(ctx.idxfile), str(resolved_hicbin_fn())],
             ctx.logdir / "contig_ec.log",
         )
 
@@ -776,7 +779,7 @@ def main(argv=None) -> int:
     step_sa, seqaln_fn = step_self_align(ctx, args)
     step_ha, resolved_hicalns_fn = step_hic_align(ctx, args)
     step_hc, resolved_hicbin_fn, will_have_hic_fn = step_hic_convert(ctx, resolved_hicalns_fn)
-    step_ec, resolved_agpec_fn = step_contig_ec(ctx, args, resolved_hicbin_fn, will_have_hic_fn)
+    step_ec, resolved_agpec_fn = step_contig_ec(ctx, args, resolved_hicbin_fn, will_have_hic_fn, seqaln_fn)
 
     def run_yahs_fn() -> bool:
         if args.run_yahs is False:

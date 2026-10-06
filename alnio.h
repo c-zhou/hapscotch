@@ -42,7 +42,7 @@ void validate_break_agp(asm_dict_t *bd);
 // build a sequence dictionary from the objects (sequence pieces) of a break AGP
 sdict_t *make_piece_sdict(asm_dict_t *bd);
 // read PAF file(s) into an aln_t array, remapping onto break-AGP pieces if break_dict is given
-aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int64 *_naln);
+aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int self_aln, int64 *_naln);
 
 #ifdef __cplusplus
 }

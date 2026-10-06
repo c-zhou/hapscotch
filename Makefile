@@ -80,7 +80,7 @@ hapscotch: hapscotch.o alnio.o busco.o overlap.o ploidy.o hap.o hic.o sdict.o pa
 hapcount: hapcount.o alnio.o busco.o overlap.o ploidy.o sdict.o paf.o range.o misc.o kthread.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
-hapcure: hapcure.o ec.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o kopen.o
+hapcure: hapcure.o ec.o hic.o sdict.o alnio.o paf.o overlap.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 hictools: hictools.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o kopen.o
@@ -120,6 +120,6 @@ hic.o: hic.h sdict.h cov.h misc.h ketopt.h kvec.h kseq.h khash.h ONElib.h
 ec.o: ec.h hic.h sdict.h misc.h kvec.h
 hictools.o: hic.h sdict.h misc.h bamlite.h khash.h kstring.h kvec.h ketopt.h version.h
 seqtools.o: agp-spec.h sdict.h bgzf.h misc.h kvec.h kstring.h ketopt.h version.h
-hapcure.o: ec.h hic.h sdict.h misc.h ketopt.h version.h
-hapcount.o: paf.h sdict.h misc.h ketopt.h kvec.h busco.h overlap.h ploidy.h alnio.h version.h
+hapcure.o: ec.h hic.h sdict.h paf.h alnio.h overlap.h misc.h ketopt.h kthread.h version.h
+hapcount.o: paf.h sdict.h misc.h ketopt.h kvec.h busco.h overlap.h ploidy.h alnio.h kthread.h version.h
 hapscotch.o: ec.h paf.h hic.h sdict.h agp-spec.h misc.h ketopt.h kvec.h kseq.h khash.h kthread.h busco.h overlap.h ploidy.h hap.h alnio.h version.h

@@ -108,7 +108,7 @@ static int i64_val_acmpfunc(const void *a, const void *b)
 // remap an alignment from raw sequence coordinates to piece coordinates
 // splitting it at piece boundaries on both axes
 // partner coordinates at cut points are estimated by linear interpolation
-static void remap_split_aln(asm_dict_t *bd, uint32 qid, uint32 tid, paf_rec_t *rec, aln_vec_t *alns)
+static void remap_split_aln(asm_dict_t *bd, uint32 qid, uint32 tid, paf_rec_t *rec, int self_aln, aln_vec_t *alns)
 {
     kvec_t(int64) cuts;
     sd_seg_t *seg;
@@ -144,6 +144,7 @@ static void remap_split_aln(asm_dict_t *bd, uint32 qid, uint32 tid, paf_rec_t *r
     kv_push(int64, cuts, rec->qe);
     qsort(cuts.a, cuts.n, sizeof(int64), i64_val_acmpfunc);
 
+    self_aln = !!self_aln;
     q0 = rec->qs;
     for (k = 0; k < cuts.n; k++) {
         q1 = cuts.a[k];
@@ -169,7 +170,7 @@ static void remap_split_aln(asm_dict_t *bd, uint32 qid, uint32 tid, paf_rec_t *r
         pt = seg->s;
         seg = break_agp_seg(bd, qid, q0);
         ps = seg->s;
-        if (ps != pt) { // skip self-mappings within a piece
+        if ((ps == pt) == self_aln) {
             mlen = (uint32) ((int64) rec->ml * (q1 - q0) / ql);
             if (mlen == 0) mlen = 1;
             kv_push(aln_t, *alns, ((aln_t){ps, 1, pt, rec->rev,
@@ -181,7 +182,7 @@ static void remap_split_aln(asm_dict_t *bd, uint32 qid, uint32 tid, paf_rec_t *r
     kv_destroy(cuts);
 }
 
-aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int64 *_naln)
+aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int self_aln, int64 *_naln)
 {
     paf_file_t *paf;
     paf_rec_t _rec, *rec;
@@ -213,12 +214,10 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
             if (!sd_exists(vd, rec->qn, rec->ql, &qid) ||
                 !sd_exists(vd, rec->tn, rec->tl, &tid))
                 continue;
-            // skip self-alignments - with a break AGP they are kept
-            // as they may link different pieces of the same sequence
-            if (qid == tid && (!break_dict || rec->qs == rec->ts))
+            if (!break_dict && (self_aln? qid != tid : qid == tid))
                 continue;
-            if (dual_aln && (qid > tid || (qid == tid && rec->qs > rec->ts)))
-                continue; // skip dual alignment
+            if (!self_aln && dual_aln && (qid > tid || (qid == tid && rec->qs > rec->ts)))
+                continue;
             // specifically, remove sequence overhangs due to assemblers
             // i.e., an identical sequence overlap
             if (rec->ml == rec->bl && 
@@ -226,7 +225,7 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
                 ((rec->ts > 0 && rec->te == rec->tl) || (rec->ts == 0 && rec->te < rec->tl)))
                 continue;
             if (break_dict)
-                remap_split_aln(break_dict, qid, tid, rec, &alns);
+                remap_split_aln(break_dict, qid, tid, rec, self_aln, &alns);
             else
                 kv_push(aln_t, alns, ((aln_t){qid, 1, tid, rec->rev, rec->qs, rec->qe, rec->ts, rec->te, rec->ml, NULL}));
         }

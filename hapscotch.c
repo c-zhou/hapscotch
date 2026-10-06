@@ -43,7 +43,7 @@
 
 int VERBOSE = 0;
 
-static void contig_error_correction(char *hic_bfile, sdict_t *dicts, char *agp_ec);
+static void contig_error_correction(char *hic_bfile, char *paf_file, sdict_t *dicts, int n_threads, char *agp_ec);
 
 static inline long parse_time(const char *str, long default_val)
 {
@@ -85,6 +85,8 @@ static ko_longopt_t long_options[] = {
     { "ec-med-drop",    ko_required_argument, 307 },
     { "ec-rec-rate",    ko_required_argument, 308 },
     { "ec-p-thresh",    ko_required_argument, 309 },
+    { "ec-pal-size",    ko_required_argument, 310 },
+    { "ec-pal-dens",    ko_required_argument, 311 },
     { "hic-file",       ko_required_argument, 'c' },
     { "agp-file",       ko_required_argument, 'a' },
     { "no-contig-ec",   ko_no_argument,       'E' },
@@ -193,6 +195,8 @@ int main(int argc, char *argv[])
         else if (c == 307) ec_conf.med_drop = atof(opt.arg);
         else if (c == 308) ec_conf.rec_rate = atof(opt.arg);
         else if (c == 309) ec_conf.p_thresh = atof(opt.arg);
+        else if (c == 310) ec_conf.pal_size = parse_num(opt.arg);
+        else if (c == 311) ec_conf.pal_dens = atof(opt.arg);
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -229,6 +233,8 @@ int main(int argc, char *argv[])
             fprintf(fp_help, "      --ec-med-drop FLOAT  minimum median drop to call a break [.3]\n");
             fprintf(fp_help, "      --ec-rec-rate FLOAT  minimum recovery rate for a breakpoint [0.8]\n");
             fprintf(fp_help, "      --ec-p-thresh FLOAT  p-value threshold for calling errors [0.01]\n");
+            fprintf(fp_help, "      --ec-pal-size NUM    minimum palindrome size [100k]\n");
+            fprintf(fp_help, "      --ec-pal-dens FLOAT  minimum palindrome density [0.8]\n");
             fprintf(fp_help, "\n");
         }
         fprintf(fp_help, "    -D                     input alignments are not dual mappings\n");
@@ -298,17 +304,17 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[E::%s] HiC BIN sequence dictionary does not match genome: %d\n", __func__, ret);
         free(hic_bfile);
         sd_destroy(dicts_raw);
-        return 1;
+        return ret;
     }
 
     // read AGP file of error corrected sequences
     // the working dictionary is made of the corrected sequence pieces
     break_dict = NULL;
     agp_ec = agp_file;
-    if (!agp_ec && hic_bfile && !no_ec) {
+    if (!agp_ec && !no_ec) {
         MYMALLOC(agp_ec, strlen(pref_out) + 12);
         sprintf(agp_ec, "%s.ec.agp", pref_out);
-        contig_error_correction(hic_bfile, dicts_raw, agp_ec);
+        contig_error_correction(hic_bfile, argv[opt.ind+1], dicts_raw, n_threads, agp_ec);
     }
     if (agp_ec) {
         break_dict = make_asm_dict_from_agp(dicts_raw, agp_ec, 0);
@@ -333,7 +339,7 @@ int main(int argc, char *argv[])
 
     // read PAF files
     naln = 0;
-    alns = read_pafs(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, &naln);
+    alns = read_pafs(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, 0, &naln);
     
     // add dual alignments and sort by aread, abpos, aepos
     qsort(alns, naln, sizeof(aln_t), aln_coords_cmpfunc);
@@ -437,27 +443,46 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-static void contig_error_correction(char *hic_bfile, sdict_t *dicts, char *agp_ec)
+static void contig_error_correction(char *hic_bfile, char *paf_file, sdict_t *dicts, int n_threads, char *agp_ec)
 {
-    if (!hic_bfile || !dicts) return;
-    
     ec_pos_t *calls;
+    uint64 *palis;
     FILE *fo;
-    int64 nhic;
     hic_t *hics;
-    int ncall;
+    aln_t *alns;
+    int64 nhic, naln;
+    int i, ncall, npali;
 
+    // call error correction positions from Hi-C
     nhic = 0;
     hics = read_hic_from_binary(hic_bfile, dicts, ec_conf.bin_size, 0, &nhic);
-    if (hics == NULL || nhic == 0) {
-        fprintf(stderr, "[E::%s] no usable HiC contacts found\n", __func__);
-        return;
-    }
-
     ncall = 0;
     calls = ec_call_breaks(hics, nhic, dicts, &ncall);
     free(hics);
     
+    // call error correction positions from palindromes
+    naln = 0;
+    alns = read_pafs(&paf_file, 1, dicts, NULL, 0, 1, &naln);
+    npali = 0;
+    palis = aln_find_palindromes(alns, naln, dicts, ec_conf.pal_size, ec_conf.pal_dens, n_threads, &npali);
+    free(alns); // no fragments to free
+
+    // merge hic and palindrome calls
+    if (npali > 0) {
+        MYREALLOC(calls, ncall+npali);
+        MYBZERO(calls+ncall, npali);
+        for (i = 0; i < npali; i++) {
+            calls[ncall+i].seq = palis[i] >> 32;
+            calls[ncall+i].pos = (uint32) palis[i];
+        }
+        ncall += npali;
+        calls = ec_merge_calls(calls, ncall, dicts, &ncall);
+    }
+
+    // report results
+    fprintf(stderr, "[M::%s] number errors called: %d\n", __func__, ncall);
+
+    // write error-correction AGP file
     fo = fopen(agp_ec, "w");
     if (fo == NULL) {
         fprintf(stderr, "[E::%s] cannot write file %s\n", __func__, agp_ec);
@@ -469,5 +494,6 @@ static void contig_error_correction(char *hic_bfile, sdict_t *dicts, char *agp_e
 
 cleanup:
     free(calls);
+    free(palis);
     return;
 }

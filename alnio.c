@@ -193,6 +193,7 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
     int i;
 
     if (_naln) *_naln = 0;
+    if (!fn) return NULL;
 
     // input PAF coordinates are always on the raw (uncorrected) sequences
     vd = break_dict? break_dict->sdict : dicts;

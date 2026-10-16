@@ -211,7 +211,7 @@ int main(int argc, char *argv[])
     
     // call error correction positions from palindromes
     naln = 0;
-    alns = read_pafs(&paf_file, 1, dicts, NULL, 0, 1, &naln);
+    alns = read_pafs(&paf_file, paf_file?1:0, dicts, NULL, 0, 1, &naln);
     npali = 0;
     palis = aln_find_palindromes(alns, naln, dicts, ec_conf.pal_size, ec_conf.pal_dens, n_threads, &npali);
     free(alns); // no fragments to free

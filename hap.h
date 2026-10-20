@@ -60,6 +60,8 @@ typedef struct {
 extern "C" {
 #endif
 
+void set_hic_window(int window);
+
 void scf_free(scf_t *scf);
 int scaff_natural_cmpfunc(const void *a, const void *b);
 

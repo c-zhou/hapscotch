@@ -51,7 +51,7 @@ typedef enum { NOSET, BED, BAM, BIN, PA5, ONE } fileType_t;
 
 extern const char *fileTypeNames[6];
 
-#define HIC_NORM_WINDOW 1000
+extern int HIC_WINDOW_SIZE;
 
 typedef struct {
     int aseq, apos;

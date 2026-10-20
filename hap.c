@@ -58,6 +58,7 @@
 #undef DEBUG_REFINE_HAP_PARTITION
 #undef DEBUG_HAPLOTYPE_PHASE
 #undef DEBUG_SV_DETECTION
+#undef DEBUG_HAPLOTYPE_LINKAGE
 
 static AGP_CT_t LG_AGP_SEQ_COMPONENT_TYPE = AGP_CT_W;
 static AGP_CT_t LG_AGP_GAP_COMPONENT_TYPE = AGP_CT_U;
@@ -471,10 +472,10 @@ static int64 count_trans_links(hic_t *hics, hidx_t *hidx, int64 nidx,
         if (b == a)
             continue;
         // skip overlaps that don't touch b's window range [b_wb, b_we)
-        if (ovls->aepos / HIC_NORM_WINDOW < b_wb || ovls->abpos / HIC_NORM_WINDOW >= b_we)
+        if (ovls->aepos / HIC_WINDOW_SIZE < b_wb || ovls->abpos / HIC_WINDOW_SIZE >= b_we)
             continue;
-        bb = ovls->bbpos / HIC_NORM_WINDOW;
-        be = ovls->bepos / HIC_NORM_WINDOW;
+        bb = ovls->bbpos / HIC_WINDOW_SIZE;
+        be = ovls->bepos / HIC_WINDOW_SIZE;
         if (hidx_bsearch(hics, hidx, nidx, b, a, bb, be, &s, &e) > 0)
             cnt += count_cis_links(hics, s, e, bb, be, a_wb, a_we);
     }
@@ -632,11 +633,25 @@ static double calculate_poisson_pvalue(int k, double lambda)
     return sf < 0.0 ? 0.0 : (sf > 1.0 ? 1.0 : sf);
 }
 
-static const int MIN_HIC_SIZE = 10000;
-static const int MIN_HIC_WINDOW = MIN_HIC_SIZE / HIC_NORM_WINDOW;
-static const int MIN_CIS_HLINK = 3;
-static const double MAX_MODIFIED_Z = 3.5;
-static const double PVAL_THRESHOLD = 0.01;
+int HIC_WINDOW_SIZE = 1000;
+
+static int MIN_HIC_SIZE = 10000;
+static int MIN_HIC_WINDOW = 10;
+static int MIN_CIS_HLINK = 3;
+static double MAX_MODIFIED_Z = 3.5;
+static double PVAL_THRESHOLD = 0.01;
+
+void set_hic_window(int window)
+{
+    if (window < 100) {
+        window = 100;
+        fprintf(stderr, "[W::%s] hic window too small, set to minimum %d\n", __func__, window);
+    }
+    HIC_WINDOW_SIZE = window;
+    MIN_HIC_WINDOW = MIN_HIC_SIZE / HIC_WINDOW_SIZE;
+    if (MIN_HIC_WINDOW < 1)
+        MIN_HIC_WINDOW = 1;
+}
 
 static void test_hic_linkage_map(hlk_t *hlks, int64 nhlk, ovl_t *ovls, int64 novl, sdict_t *dicts)
 {
@@ -882,12 +897,12 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     // coordinates are converted to piece coordinates while reading
     nhic = 0;
     hics = break_dict?
-        read_hic_from_binary_sd_conversion((char *) hic_bfile, break_dict, HIC_NORM_WINDOW, min_qual, &nhic) :
-        read_hic_from_binary((char *) hic_bfile, dicts, HIC_NORM_WINDOW, min_qual, &nhic);
+        read_hic_from_binary_sd_conversion((char *) hic_bfile, break_dict, HIC_WINDOW_SIZE, min_qual, &nhic) :
+        read_hic_from_binary((char *) hic_bfile, dicts, HIC_WINDOW_SIZE, min_qual, &nhic);
     // make the HiC links symmetric
     hics = add_symmetric_hic_links(hics, &nhic);
     // some basic statistics
-    hic_linkage_stats(hics, nhic, dicts, HIC_NORM_WINDOW);
+    hic_linkage_stats(hics, nhic, dicts, HIC_WINDOW_SIZE);
 #endif
 
     if (hics == NULL || nhic == 0) {
@@ -901,7 +916,7 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     // maximum sequence length in windows
     mseq = 0;
     for (i = 0; i < nseq; i++) {
-        s = (dicts->s[i].len - 1) / HIC_NORM_WINDOW + 1;
+        s = (dicts->s[i].len - 1) / HIC_WINDOW_SIZE + 1;
         if (s > mseq) mseq = s;
     }
 
@@ -965,17 +980,17 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
             if (nf < 1.) Wend = i; // using 90% intra links to estimate the end window size
         }
     }
-    if (Wend < 100000 / HIC_NORM_WINDOW) // 100kb minimum end window size
-        Wend = 100000 / HIC_NORM_WINDOW;
-    fprintf(stderr, "[M::%s] using hic window size: %d bp\n", __func__, HIC_NORM_WINDOW);
-    fprintf(stderr, "[M::%s] using terminal window: %d kb\n", __func__, Wend * HIC_NORM_WINDOW / 1000);
+    if (Wend < 100000 / HIC_WINDOW_SIZE) // 100kb minimum end window size
+        Wend = 100000 / HIC_WINDOW_SIZE;
+    fprintf(stderr, "[M::%s] using hic window size: %d bp\n", __func__, HIC_WINDOW_SIZE);
+    fprintf(stderr, "[M::%s] using terminal window: %d kb\n", __func__, Wend * HIC_WINDOW_SIZE / 1000);
 
     // collect windows covered by hic links
     kv_init(rngs);
     kv_resize(range_t, rngs, 1<<20);
     a = hidx[0].a;
     b = rngs.n;
-    a_wl = dicts->s[a].len / HIC_NORM_WINDOW;
+    a_wl = dicts->s[a].len / HIC_WINDOW_SIZE;
     for (i = 0; i <= nidx; i++) {
         if (i == nidx || hidx[i].a != a) {
             p = merge_ranges(rngs.a + b, rngs.n - b, 0);
@@ -985,7 +1000,7 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
             if (i == nidx) break;
             a = hidx[i].a;
             b = rngs.n;
-            a_wl = dicts->s[a].len / HIC_NORM_WINDOW;
+            a_wl = dicts->s[a].len / HIC_WINDOW_SIZE;
         }
         if (a == hidx[i].b)
             continue;
@@ -1019,9 +1034,9 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     // collect stats
     stot = htot = 0;
     for (i = 0; i < nseq; i++) {
-        a_wl = dicts->s[i].len / HIC_NORM_WINDOW;
+        a_wl = dicts->s[i].len / HIC_WINDOW_SIZE;
         a_wl = MIN(a_wl, Wend);
-        b_wl = dicts->s[i].len / HIC_NORM_WINDOW - Wend;
+        b_wl = dicts->s[i].len / HIC_WINDOW_SIZE - Wend;
         b_wl = MAX(b_wl, 0);
         rng = srngs + (ridx[i] >> 32);
         p = (uint32) ridx[i];
@@ -1072,8 +1087,8 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
         tcnts[i] = (ovl_cnt_t) {
             i, 
             ovls[i].bread, 
-            ovls[i].bbpos / HIC_NORM_WINDOW, 
-            ovls[i].bepos / HIC_NORM_WINDOW, 
+            ovls[i].bbpos / HIC_WINDOW_SIZE, 
+            ovls[i].bepos / HIC_WINDOW_SIZE, 
             ovls[i].del ? -1 : 0 // mark deleted overlaps here
         };
     // sort by b so we can do a linear scan to compute all trans
@@ -1092,16 +1107,16 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     // count for each sequence
     for (i = 0; i < nseq; i++) {
         n = (uint32) index[i];
-        w = dicts->s[i].len / HIC_NORM_WINDOW;
+        w = dicts->s[i].len / HIC_WINDOW_SIZE;
         oc = tcnts + (index[i]>>32);
         tlens[i] = count_trans_olaps(oc, n);
         tlens_beg[i] = tlens_end[i] = 0;
         for (j = 0; j < n; j++) {
             ov = ovls + oc[j].which;
             if (ov->del) continue;
-            if (ov->abpos / HIC_NORM_WINDOW < Wend)
+            if (ov->abpos / HIC_WINDOW_SIZE < Wend)
                 tlens_beg[i] += oc[j].cnt;
-            if (ov->aepos / HIC_NORM_WINDOW >= w - Wend)
+            if (ov->aepos / HIC_WINDOW_SIZE >= w - Wend)
                 tlens_end[i] += oc[j].cnt;
         }
     }
@@ -1119,8 +1134,8 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
             continue; // skip overlapped sequences
 
         // check four beg/end recombinations to find the one with the most cis links
-        a_wl = dicts->s[a].len / HIC_NORM_WINDOW;
-        b_wl = dicts->s[b].len / HIC_NORM_WINDOW;
+        a_wl = dicts->s[a].len / HIC_WINDOW_SIZE;
+        b_wl = dicts->s[b].len / HIC_WINDOW_SIZE;
         a_st = (a_wl <= Wend);
         b_st = (b_wl <= Wend);
         best_ea = best_eb = 0;
@@ -1711,9 +1726,10 @@ static void vns_data_destroy(vns_data_t *data)
 typedef struct {
     int nseq;
     uint32 *seqs;
-    uint32 *type;
     int64 slen;
 } scf_block_t;
+
+typedef kvec_t(scf_block_t) scf_block_v;
 
 typedef struct {
     uint32 seq:31, rev:1;
@@ -2605,80 +2621,73 @@ static void mst_order_groups(scf_block_t *blks, int nblk, ovl_t *ovls, uint64 *i
     kv_destroy(me);
 }
 
-// haplotype ordering constants and types
-#define HO_MINBLK 50000
-#define HO_TOL    500000.0
-#define HO_MIN_SPLIT_GAIN 3e5
-#define HO_MAX_SPLIT_ROUNDS 40
+/************************************************************** */
+/* ******************** Haplotype ordering ******************** */
+/************************************************************** */
+/**
+ * Every non-skipped block is one group of sequences (blks[i].seqs[j] >> 1 is the sequence id).  The sequences of all haplotypes
+ * of a group are laid out on one coordinate axis; every sequence gets ONE strand and ONE offset (no inversions, no cutting).
+ * Results go to haps[].rev / bpos / epos (positions shifted so that the smallest bpos of a group is 0).  haplotype labels are
+ * 1..ploidy; hap <= 0 or > ploidy marks an unassigned sequence.  haps[].hap is not modified.
+ *
+ * index[a] = (first overlap << 32) | number of overlaps with aread == a.  Overlaps with `del` set are ignored.  Single-sequence
+ * blocks get [0, len) (haps[].rev is left untouched for them).
+ *
+ * Method (per block)
+ *   1. Backbone (ho_sync): every sequence gets a strand and an offset by synchronization: the fragment chains between sequences of
+ *      different haplotypes ("readings", one per relative strand) propose relative maps (mirror, shift); clusters of sequences are
+ *      merged, best-supported first, by the heaviest group of agreeing proposals, penalised by the overlap a merge would create
+ *      between sequences of the same haplotype; the rest is joined to the largest cluster, and every sequence is refined against
+ *      all its readings.
+ *   2. Leftovers (sequences without a reading to the backbone): placed against it from their whole-overlap blocks, longest first;
+ *      sequences without any block are stacked after the end of the layout.
+ *   3. Unpile: two sequences of the same haplotype that overlap in the layout by HO_PILE_FRAC of the shorter one are ordered by
+ *      their aligned intervals on the partners they share (HO_PILE_VOTES); if that contradicts their positions, the later one
+ *      is moved right behind the earlier one.
+ *   4. Project: sequences of one haplotype keep their order but may not overlap; overlaps are removed by opening gaps
+ *      (weighted isotonic regression per haplotype, alternating with the offsets implied by the partners).
+ *   5. Inversions (after the shift to 0): per haplotype pair, the alignment fragments are chained (reverse pieces into atoms that may
+ *      contain a nested re-inversion, then the heaviest collinear chain); elements off the chain form secondary subchains ("events").
+ *      Runs of whole sequences near the events are inverted (alone or together with their homologous runs in the other haplotypes)
+ *      or moved, greedily, while the score (chain weight, inversions slightly discounted) rises and the off-chain weight does not
+ *      (see ho_invfix).
+ **/
+#define HO_MOVE_TOL      1000.0   /* offset change (bp) that counts as a move */
+#define HO_PILE_FRAC     0.5      /* same-haplotype sequences overlapping by this share of the shorter one count as piled up */
+#define HO_PILE_VOTES    2        /* minimum net number of shared partners that must agree on the order of a piled-up pair */
+#define HO_UNPILE_PASSES 5
+#define HO_PROJ_ROUNDS   20       /* maximum rounds of the no-overlap projection */
+
+typedef struct { int a, b, raw; const ovl_t *o; } ho_e_t;               /* one overlap record per sequence pair */
+typedef struct {                                                        /* rel: 0 same strand, 1 opposite */
+    int a, b, rel;
+    double ma, mb, w;
+    double ha, hb;                                                      /* half-lengths of the aligned intervals on a and b */
+} ho_blk_t;
+typedef struct { double x, y, w, h; int p, rel, k; } ho_nb_t;           /* neighbour entry: x = anchor on this sequence, y = on p, h = half-length on p, k = block */
+typedef struct { double v, w; } ho_est_t;                               /* offset estimate and its weight */
+#define HO_SWAPD(x, y) do { double t_ = (x); (x) = (y); (y) = t_; } while (0)
 
 typedef struct {
-    int a, b;                 /* local sequence ids */
-    int ab, ae, bb, be, rel;  /* rel: 0 same strand, 1 opposite */
-    int na, nb;               /* node ids (filled by ho_build) */
-    int64 w;
-    double ma, mb;
-} ho_blk_t;
-typedef struct { int a, b, raw; const ovl_t *o; } ho_e_t;
-typedef struct { int a, b; int64 w0, w1; } ho_agg_t;
-typedef struct { int len, idx; } ho_li_t;
-typedef struct { double mid; int64 w; int want; int ab, ae; } ho_item_t;
-typedef struct { int lo, hi, o, ev; double b, e; } ho_piece_t;
-typedef struct { int c, hap, kind; double a, b; } ho_junc_t;         /* kind 0 = 'L', 1 = 'R' */
-typedef struct { int hap, idn, nbr, br[2]; double a, b; } ho_event_t;
-typedef struct { double d; int i, j; } ho_pair_t;
-typedef struct { int64 best; int seq, ncl, cl[2]; } ho_cand_t;
-typedef struct { double s, e; } ho_iv_t;
-typedef struct { int idx; int hap; int64 start; } ho_ord_t;
-typedef kvec_t(int) ho_ivec_t;
+    const sdict_t *dicts;
+    int ns, nsmax, ploidy;
+    int *gid, *slen, *hap;       /* per sequence (size nsmax); local ids ascending in global id */
+    int *off, *order;            /* CSR offsets into nb (nsmax + 1); sequence order (nsmax) */
+    uint8 *rev, *state;          /* layout strand; state: 0 free, 1 placed */
+    double *pos, *strength;      /* layout offset of the sequence start; total block weight */
+    kvec_t(ho_e_t) E;
+    kvec_t(ho_blk_t) B;
+    ho_nb_t *nb; int64 nb_cap;
+    ho_est_t *est; int64 est_cap;
+} ho_ctx_t;
 
-/* reusable scratch buffers: (type, name); capacity is tracked in <name>_cap */
-#define HO_BUFS(X) \
-    X(int, nseq) X(int, nk) X(uint8, ori) X(double, x)                       /* nodes */ \
-    X(ho_agg_t, o_ag) X(ho_agg_t, o_srt) X(int, o_off) X(int, o_nbr) X(int, o_eid) X(int, o_q) \
-    X(int, o_par) X(int, o_head) X(int, o_nxt) X(int, o_to) X(int, o_ne) X(uint8, o_seen) \
-    X(ho_li_t, o_L) X(int64, o_g)                                             /* orient / split */ \
-    X(ho_item_t, s_it) X(int, s_cd)                                           /* split */ \
-    X(int, p_ra) X(int, p_rb) X(double, p_rhs) X(double, p_sig) X(double, p_w) X(double, p_sw) \
-    X(double, p_bb) X(double, p_r) X(double, l_v) X(double, l_w)              /* place / lsqr */ \
-    X(int, fp_pc) X(int, fp_tp)                                               /* fragment pieces */ \
-    X(int, c_off) X(int, c_nb) X(int, c_raw) X(int, c_pp)                     /* strand convention */ \
-    X(ho_piece_t, P) X(ho_piece_t, NP) X(uint8, used)                         /* analysis */ \
-    X(ho_iv_t, d_iv) X(ho_ord_t, d_ord) X(int, d_cont)                        /* debug only */
-
-#define HO_DECL(T, f) T *f; int64 f##_cap
+#define HO_NAME(M, c) ((M)->dicts->s[(M)->gid[c]].name)
 #define HO_ENS(cx, f, n) do { \
     if ((int64)(n) > (cx)->f##_cap) { \
         (cx)->f##_cap = (int64)(n); kroundup64((cx)->f##_cap); \
         MYREALLOC((cx)->f, (cx)->f##_cap); \
-        if (!(cx)->f) mem_alloc_error("hap_order"); \
+        if (!(cx)->f) mem_alloc_error("hap order array"); \
     } } while (0)
-
-typedef struct {
-    const sdict_t *dicts;
-    int ns, nsmax;
-    /* per-sequence (size nsmax, local ids ascending in global id) */
-    int *gid, *slen, *hap, *noff;
-    int *foc, *noc; double *fx0, *nx0;
-    uint8 *rev; int64 *bpos, *epos;
-    ho_ivec_t *cuts;                 /* sorted cut points per sequence, incl. 0 and len */
-    /* model */
-    int nn;                          /* node id = noff[c] + k */
-    kvec_t(ho_blk_t) B;
-    /* group inputs / analysis vectors */
-    kvec_t(ho_e_t) E;
-    kvec_t(ho_junc_t) J;
-    kvec_t(ho_event_t) EV;
-    kvec_t(ho_pair_t) cand;
-    kvec_t(int) rc, rcut;
-    /* scratch */
-#define X(T, f) HO_DECL(T, f);
-    HO_BUFS(X)
-#undef X
-} ho_ctx_t;
-
-#define HO_NAME(M, c) ((M)->dicts->s[(M)->gid[c]].name)
-#define NCUT(M, c) ((int)kv_size((M)->cuts[c]))
-#define CUT(M, c, k) (kv_A((M)->cuts[c], (k)))
 
 static int ho_cmp_int(const void *p, const void *q)
 {
@@ -2688,912 +2697,1386 @@ static int ho_cmp_int(const void *p, const void *q)
 
 static void ho_init(ho_ctx_t *M, const sdict_t *dicts, int nsmax)
 {
-    int c;
-    memset(M, 0, sizeof(*M));
+    size_t nsm = (size_t) nsmax;
+    MYBZERO(M, 1);
     M->dicts = dicts; M->nsmax = nsmax;
-    MYMALLOC(M->gid, nsmax);  MYMALLOC(M->slen, nsmax); MYMALLOC(M->hap, nsmax); MYMALLOC(M->noff, nsmax + 1);
-    MYMALLOC(M->foc, nsmax);  MYMALLOC(M->noc, nsmax);  MYMALLOC(M->fx0, nsmax); MYMALLOC(M->nx0, nsmax);
-    MYMALLOC(M->rev, nsmax);  MYMALLOC(M->bpos, nsmax); MYMALLOC(M->epos, nsmax);
-    MYMALLOC(M->cuts, nsmax);
-    for (c = 0; c < nsmax; c++) kv_init(M->cuts[c]);
-    kv_init(M->B); kv_init(M->E); kv_init(M->J); kv_init(M->EV); kv_init(M->cand); kv_init(M->rc); kv_init(M->rcut);
+    MYMALLOC(M->gid, nsm); MYMALLOC(M->slen, nsm); MYMALLOC(M->hap, nsm);
+    MYMALLOC(M->off, nsm + 1); MYMALLOC(M->order, nsm);
+    MYMALLOC(M->rev, nsm); MYMALLOC(M->state, nsm);
+    MYMALLOC(M->pos, nsm); MYMALLOC(M->strength, nsm);
+    if (!M->gid || !M->slen || !M->hap || !M->off || !M->order || !M->rev || !M->state || !M->pos || !M->strength)
+        mem_alloc_error("hap order array");
+    kv_init(M->E); kv_init(M->B);
 }
 
 static void ho_destroy(ho_ctx_t *M)
 {
-    int c;
-    for (c = 0; c < M->nsmax; c++) kv_destroy(M->cuts[c]);
-    free(M->cuts);
-    free(M->gid); free(M->slen); free(M->hap); free(M->noff); free(M->foc); free(M->noc);
-    free(M->fx0); free(M->nx0); free(M->rev); free(M->bpos); free(M->epos);
-    kv_destroy(M->B); kv_destroy(M->E); kv_destroy(M->J); kv_destroy(M->EV); kv_destroy(M->cand);
-    kv_destroy(M->rc); kv_destroy(M->rcut);
-#define X(T, f) free(M->f);
-    HO_BUFS(X)
-#undef X
+    free(M->gid); free(M->slen); free(M->hap); free(M->off); free(M->order);
+    free(M->rev); free(M->state); free(M->pos); free(M->strength);
+    kv_destroy(M->E); kv_destroy(M->B);
+    free(M->nb); free(M->est);
 }
 
-static void ho_blocks_from_ovl(ho_ctx_t *M, const ovl_t *o, int a, int b, int plus_is_same)
+static int ho_same_hap(const ho_ctx_t *M, int a, int b, int ploidy)
 {
-    int alen = M->slen[a], blen = M->slen[b], f, g;
-    if (o->nfrag > 0) {
-        const ovl_frag_t *fr = o->frags;
-        int nf = o->nfrag;
-        int (*pc)[2], (*tp)[2];
-        HO_ENS(M, fp_pc, 2 * (nf + 2)); HO_ENS(M, fp_tp, 2 * (nf + 2));
-        pc = (int (*)[2]) M->fp_pc; tp = (int (*)[2]) M->fp_tp;
-        for (f = 0; f < nf; f++) {
-            int x1 = fr[f].abpos, x2 = fr[f].aepos, y1 = fr[f].bbpos, y2 = fr[f].bepos, r = fr[f].rev;
-            int np = 1, i;
-            if (x2 <= x1) continue;
-            pc[0][0] = x1; pc[0][1] = x2;
-            /* subtract nested opposite-strand fragments (in-place inversions) */
-            for (g = 0; g < nf; g++) {
-                int u1 = fr[g].abpos, u2 = fr[g].aepos, v1 = fr[g].bbpos, v2 = fr[g].bepos, r2 = fr[g].rev;
-                int nn = 0;
-                if (r2 == r) continue;
-                if (!(x1 <= u1 && u2 <= x2 && y1 <= MIN(v1, v2) && MAX(v1, v2) <= y2)) continue;
-                if ((u2 - u1) >= (x2 - x1) * 0.9) continue;
-                for (i = 0; i < np; i++) {
-                    int p1 = pc[i][0], p2 = pc[i][1];
-                    if (u2 <= p1 || u1 >= p2) { tp[nn][0] = p1; tp[nn][1] = p2; nn++; continue; }
-                    if (u1 > p1) { tp[nn][0] = p1; tp[nn][1] = u1; nn++; }
-                    if (u2 < p2) { tp[nn][0] = u2; tp[nn][1] = p2; nn++; }
-                }
-                memcpy(pc, tp, sizeof(int) * 2 * nn);
-                np = nn;
-            }
-            for (i = 0; i < np; i++) {
-                int p1 = pc[i][0], p2 = pc[i][1];
-                double t1, t2, q1, q2;
-                ho_blk_t k;
-                if (p2 - p1 < HO_MINBLK) continue;
-                t1 = (double)(p1 - x1) / (x2 - x1);
-                t2 = (double)(p2 - x1) / (x2 - x1);
-                if (r) { q1 = y2 - t2 * (y2 - y1); q2 = y2 - t1 * (y2 - y1); }
-                else   { q1 = y1 + t1 * (y2 - y1); q2 = y1 + t2 * (y2 - y1); }
-                k.a = a; k.b = b; k.rel = r;
-                k.ab = MAX(p1, 0); k.ae = MIN(p2, alen);
-                k.bb = (int)(q1 > 0 ? q1 : 0); k.be = (int)(q2 < blen ? q2 : blen);
-                k.na = k.nb = 0;
-                k.w = MIN(k.ae - k.ab, k.be - k.bb);
-                k.ma = (k.ab + k.ae) / 2.0; k.mb = (k.bb + k.be) / 2.0;
-                if (k.w > 0) kv_push(ho_blk_t, M->B, k);
-            }
-        }
-    } else {
-        int raw = (o->arev != o->brev);
-        ho_blk_t k;
-        k.a = a; k.b = b; k.rel = plus_is_same ? raw : 1 - raw;
-        k.ab = o->abpos; k.ae = o->aepos; k.bb = o->bbpos; k.be = o->bepos;
-        k.na = k.nb = 0;
-        k.w = MIN(k.ae - k.ab, k.be - k.bb);
-        k.ma = (k.ab + k.ae) / 2.0; k.mb = (k.bb + k.be) / 2.0;
-        if (k.w > 0) kv_push(ho_blk_t, M->B, k);
+    return M->hap[a] >= 1 && M->hap[a] <= ploidy && M->hap[a] == M->hap[b];
+}
+
+/* blocks -> CSR neighbour lists + strengths (after a block is flipped) */
+static void ho_fill_nb(ho_ctx_t *M)
+{
+    int ns = M->ns, i, k, nb_ = (int)kv_size(M->B);
+    int *fill;
+    MYBZERO(M->off, ns + 1);
+    for (i = 0; i < ns; i++) M->strength[i] = 0;
+    for (k = 0; k < nb_; k++) {
+        const ho_blk_t *b = &kv_A(M->B, k);
+        M->off[b->a + 1]++; M->off[b->b + 1]++;
+        M->strength[b->a] += b->w; M->strength[b->b] += b->w;
+    }
+    for (i = 0; i < ns; i++) M->off[i + 1] += M->off[i];
+    HO_ENS(M, nb, 2 * (int64) nb_ + 1);
+    MYMALLOC(fill, ns + 1);
+    if (!fill) mem_alloc_error("hap order array");
+    memcpy(fill, M->off, (ns + 1) * sizeof(int));
+    for (k = 0; k < nb_; k++) {
+        const ho_blk_t *b = &kv_A(M->B, k);
+        ho_nb_t *p = &M->nb[fill[b->a]++], *q = &M->nb[fill[b->b]++];
+        p->x = b->ma; p->y = b->mb; p->w = b->w; p->h = b->hb; p->p = b->b; p->rel = b->rel; p->k = k;
+        q->x = b->mb; q->y = b->ma; q->w = b->w; q->h = b->ha; q->p = b->a; q->rel = b->rel; q->k = k;
+    }
+    free(fill);
+}
+
+/* overlap records -> alignment blocks (whole overlap) */
+static void ho_build_evidence(ho_ctx_t *M, int ploidy)
+{
+    int k, ne = (int)kv_size(M->E);
+    M->B.n = 0;
+    for (k = 0; k < ne; k++) {
+        const ho_e_t *e = &kv_A(M->E, k);
+        const ovl_t *o = e->o;
+        ho_blk_t b;
+        if (ho_same_hap(M, e->a, e->b, ploidy)) continue;
+        b.a = e->a; b.b = e->b; b.rel = e->raw;
+        b.w = (double) MIN(o->aepos - o->abpos, o->bepos - o->bbpos);
+        if (b.w <= 0) continue;
+        b.ma = (o->abpos + o->aepos) / 2.0; b.mb = (o->bbpos + o->bepos) / 2.0;
+        b.ha = (o->aepos - o->abpos) / 2.0; b.hb = (o->bepos - o->bbpos) / 2.0;
+        kv_push(ho_blk_t, M->B, b);
     }
 }
 
-/* strand convention from triangle parity of the O signs: 1 if '+' means same strand */
-static int ho_plus_is_same(ho_ctx_t *M)
+static int ho_cmp_est(const void *p, const void *q)
 {
-    int ns = M->ns, ne = (int)kv_size(M->E), t, u, p, q, bal = 0, unb = 0;
-    int *off, *nb, *raw, *pp;
-    HO_ENS(M, c_off, ns + 2); HO_ENS(M, c_nb, 2 * ne + 1); HO_ENS(M, c_raw, 2 * ne + 1); HO_ENS(M, c_pp, ns + 1);
-    off = M->c_off; nb = M->c_nb; raw = M->c_raw; pp = M->c_pp;
-    memset(off, 0, (ns + 2) * sizeof(int)); memset(pp, 0, (ns + 1) * sizeof(int));
-    for (t = 0; t < ne; t++) { off[kv_A(M->E, t).a + 1]++; off[kv_A(M->E, t).b + 1]++; }
-    for (t = 0; t < ns; t++) off[t + 1] += off[t];
-    for (t = 0; t < ne; t++) {
-        int a = kv_A(M->E, t).a, b = kv_A(M->E, t).b, r = kv_A(M->E, t).raw;
-        nb[off[a] + pp[a]] = b; raw[off[a] + pp[a]++] = r;
-        nb[off[b] + pp[b]] = a; raw[off[b] + pp[b]++] = r;
-    }
-    for (u = 0; u < ns; u++)          /* sort each adjacency list by neighbour id (raw bit follows) */
-        for (p = off[u] + 1; p < off[u + 1]; p++) {
-            int kn = nb[p], kr = raw[p];
-            for (q = p - 1; q >= off[u] && nb[q] > kn; q--) { nb[q + 1] = nb[q]; raw[q + 1] = raw[q]; }
-            nb[q + 1] = kn; raw[q + 1] = kr;
-        }
-    for (u = 0; u < ns; u++)
-        for (p = off[u]; p < off[u + 1]; p++) {
-            int v = nb[p], r1 = raw[p], p2;
-            if (v <= u) continue;
-            for (p2 = p + 1; p2 < off[u + 1]; p2++) {
-                int w = nb[p2], r2 = raw[p2], lo = off[v], hi = off[v + 1] - 1, r3 = -1;
-                while (lo <= hi) {
-                    int m = (lo + hi) >> 1;
-                    if (nb[m] == w) { r3 = raw[m]; break; }
-                    if (nb[m] < w) lo = m + 1; else hi = m - 1;
-                }
-                if (r3 < 0) continue;
-                if (r1 ^ r3 ^ r2) unb++; else bal++;
-            }
-        }
-    return bal >= unb;
+    double a = ((const ho_est_t*)p)->v, b = ((const ho_est_t*)q)->v;
+    return (a > b) - (a < b);
 }
 
-static int ho_seg_of(const ho_ctx_t *M, int c, double p)
+/* strand and offset of sequence s from its blocks to the placed sequences; returns 0 if there are none.
+ * agree = share of the block weight that supports the chosen strand */
+static int ho_place_seq(ho_ctx_t *M, int s, int *rev, double *offs, double *agree)
 {
-    int n = NCUT(M, c), lo = 0, hi = n, k;
-    while (lo < hi) { int m = (lo + hi) >> 1; if (p < CUT(M, c, m)) hi = m; else lo = m + 1; }
-    k = lo - 1;
-    if (k < 0) k = 0;
-    if (k > n - 2) k = n - 2;
+    double votes[2] = {0, 0}, tot, acc = 0, L = M->slen[s];
+    int i, r, ncand = 0, ne = 0;
+    for (i = M->off[s]; i < M->off[s + 1]; i++) {
+        const ho_nb_t *n = &M->nb[i];
+        if (M->state[n->p] != 1) continue;
+        votes[M->rev[n->p] ^ n->rel] += n->w; ncand++;
+    }
+    if (ncand == 0) return 0;
+    r = votes[1] > votes[0];
+    *agree = votes[r] / (votes[0] + votes[1]);
+    HO_ENS(M, est, M->off[s + 1] - M->off[s] + 1);
+    for (i = M->off[s]; i < M->off[s + 1]; i++) {
+        const ho_nb_t *n = &M->nb[i];
+        double pp;
+        if (M->state[n->p] != 1 || (M->rev[n->p] ^ n->rel) != r) continue;
+        pp = M->rev[n->p] ? M->pos[n->p] + M->slen[n->p] - n->y : M->pos[n->p] + n->y;     /* layout coordinate of the partner anchor */
+        M->est[ne].v = r ? pp + n->x - L : pp - n->x; M->est[ne].w = n->w; ne++;
+    }
+    if (ne == 0) return 0;
+    qsort(M->est, ne, sizeof(ho_est_t), ho_cmp_est);
+    for (i = 0, tot = 0; i < ne; i++) tot += M->est[i].w;
+    for (i = 0; i < ne; i++) { acc += M->est[i].w; if (acc >= tot / 2) break; }
+    *rev = r; *offs = M->est[i < ne ? i : ne - 1].v;
+    return 1;
+}
+
+static const int *ho_len_ref;
+static int ho_cmp_len_desc(const void *p, const void *q)
+{
+    int a = *(const int*)p, b = *(const int*)q;
+    if (ho_len_ref[a] != ho_len_ref[b]) return ho_len_ref[b] > ho_len_ref[a] ? 1 : -1;
+    return (a > b) - (a < b);
+}
+
+/* net number of shared partners on which the aligned part of s lies before (+) or after (-) that of t; overlapping parts abstain */
+static int ho_order_vote(const ho_ctx_t *M, int s, int t)
+{
+    int i, j, v = 0;
+    for (i = M->off[s]; i < M->off[s + 1]; i++)
+        for (j = M->off[t]; j < M->off[t + 1]; j++) {
+            const ho_nb_t *a = &M->nb[i], *b = &M->nb[j];
+            int p = a->p;
+            double ca, cb;
+            if (b->p != p) continue;
+            ca = M->rev[p] ? M->pos[p] + M->slen[p] - a->y : M->pos[p] + a->y;     /* centres in layout coordinates */
+            cb = M->rev[p] ? M->pos[p] + M->slen[p] - b->y : M->pos[p] + b->y;
+            if (ca + a->h <= cb - b->h) v++;
+            else if (cb + b->h <= ca - a->h) v--;
+        }
+    return v;
+}
+
+/* Same-haplotype sequences cannot pile up.  If two overlap by HO_PILE_FRAC of the shorter one and the order on their shared
+ * partners contradicts the order of their positions, the later one is moved right behind the earlier one. */
+static void ho_unpile(ho_ctx_t *M)
+{
+    int ns = M->ns, s, t, pass, moved = 1;
+    for (pass = 0; moved && pass < HO_UNPILE_PASSES; pass++) {
+        moved = 0;
+        for (s = 0; s < ns; s++)
+            for (t = s + 1; t < ns; t++) {
+                double ov = MIN(M->pos[s] + M->slen[s], M->pos[t] + M->slen[t]) - MAX(M->pos[s], M->pos[t]);
+                int v, f, g;
+                if (!ho_same_hap(M, s, t, M->ploidy) || ov < HO_PILE_FRAC * MIN(M->slen[s], M->slen[t])) continue;
+                v = ho_order_vote(M, s, t);
+                if (abs(v) < HO_PILE_VOTES || (v > 0) == (M->pos[s] <= M->pos[t])) continue;
+                f = v > 0 ? s : t; g = v > 0 ? t : s;       /* f should come first, g currently does */
+                M->pos[f] = M->pos[g]; M->pos[g] = M->pos[f] + M->slen[f]; moved = 1;
+            }
+    }
+}
+
+static const ho_ctx_t *ho_ref;
+static int ho_cmp_hap_pos(const void *p, const void *q)
+{
+    int a = *(const int*)p, b = *(const int*)q;
+    if (ho_ref->hap[a] != ho_ref->hap[b]) return ho_ref->hap[a] < ho_ref->hap[b] ? -1 : 1;
+    if (ho_ref->pos[a] != ho_ref->pos[b]) return ho_ref->pos[a] < ho_ref->pos[b] ? -1 : 1;
+    return (a > b) - (a < b);
+}
+
+/* Sequences of one haplotype keep their order but may not overlap.  Haplotype by haplotype, every sequence is pulled to the offset
+ * its partners imply, then the chain is made gap-tolerant and overlap-free by weighted isotonic regression (pool adjacent violators)
+ * on the positions minus the cumulative lengths, so overlaps are resolved by opening gaps. */
+static void ho_project(ho_ctx_t *M)
+{
+    int ns = M->ns, i, j, a, b, k, s, top, rnd, moved = 1, n = 0, *cnt;
+    double *tg, cum;
+    MYMALLOC(cnt, ns + 1); MYMALLOC(tg, ns + 1);
+    if (!cnt || !tg) mem_alloc_error("hap order array");
+    HO_ENS(M, est, ns + 1);
+    for (i = 0; i < ns; i++) if (M->hap[i] >= 1 && M->hap[i] <= M->ploidy) M->order[n++] = i;
+    ho_ref = M; qsort(M->order, n, sizeof(int), ho_cmp_hap_pos);
+    for (rnd = 0; moved && rnd < HO_PROJ_ROUNDS; rnd++) {
+        moved = 0;
+        for (a = 0; a < n; a = b) {
+            for (b = a; b < n && M->hap[M->order[b]] == M->hap[M->order[a]]; b++);
+            for (k = a; k < b; k++) {
+                int rev; double offs, agree;
+                s = M->order[k];
+                tg[k] = (ho_place_seq(M, s, &rev, &offs, &agree) && rev == M->rev[s]) ? offs : M->pos[s];
+            }
+            for (k = a, top = 0, cum = 0; k < b; k++) {
+                s = M->order[k];
+                M->est[top].v = tg[k] - cum; M->est[top].w = M->strength[s] + 1; cnt[top++] = 1;
+                cum += M->slen[s];
+                while (top > 1 && M->est[top - 2].v > M->est[top - 1].v) {
+                    ho_est_t *u = &M->est[top - 2], *v = &M->est[top - 1];
+                    u->v = (u->v * u->w + v->v * v->w) / (u->w + v->w); u->w += v->w; cnt[top - 2] += cnt[top - 1]; top--;
+                }
+            }
+            for (j = 0, k = a, cum = 0; j < top; j++)
+                for (i = 0; i < cnt[j]; i++, k++) {
+                    s = M->order[k];
+                    if (fabs(M->est[j].v + cum - M->pos[s]) > HO_MOVE_TOL) moved = 1;
+                    M->pos[s] = M->est[j].v + cum; cum += M->slen[s];
+                }
+        }
+    }
+    free(cnt); free(tg);
+}
+
+/* Inversion */
+/* The layout is judged by collinearity, for every pair of haplotypes separately, and changed by moving runs of whole sequences.
+ *
+ * Score (ho_analyse)
+ *  - Pieces: the alignment fragments of >= HO_INV_MINLEN (the whole overlap if it has none) laid out on the two layout axes.
+ *  - Atoms: reverse pieces (anti-diagonal) are grouped into atoms (ho_atoms): chained locally, then neighbouring atoms in anti-diagonal
+ *    order are merged with the forward pieces between them (an inversion with a re-inverted part inside is one event, not two).
+ *    An atom is weighed by chaining its pieces in the mirrored frame by the same rules (ho_atom_weigh), so nested re-inversions are
+ *    atoms there, to any depth, and the forward and the inverted state of a block score alike up to HO_INV_REVCOST; pieces off that
+ *    chain are released as elements of their own.  An atom is one forward element (box and weight of its chain).
+ *  - Chain: heaviest extent-aware chain over the elements (forward pieces and atoms; boxes shrunk at both ends by HO_INV_OVL of
+ *    their length, at most HO_INV_OVLMAX, as overlap tolerance).  The primary chain is unit 0; the other elements are cut into
+ *    secondary subchains (units 1..) by backtracking the DP from the highest score down to an element that already has a unit.
+ *  - Score: chain weight minus HO_INV_REVCOST x the reverse weight on the chains (an inversion counts slightly less than collinear
+ *    alignment, so inverting a block that is collinear with the other haplotypes is not free); unused weight: secondary units of
+ *    >= HO_INV_MINW (the "events").
+ *
+ * Search (ho_invfix)
+ *  - Runs: for every event U, the last chain element P fully before U and the first one S fully after it bound a range on each axis;
+ *    the whole run of sequences of that haplotype inside the range (+-HO_INV_TOL), i.e. the used part between the flanks, and every
+ *    contiguous run in it that starts or ends with a sequence carrying event weight are candidates (at most HO_INV_MAXRUN sequences).
+ *  - Operations on a run R of haplotype h:
+ *      invert  R is mirrored in its own extent (order and strands reversed);
+ *      group   R and its homologous runs in the other haplotypes are inverted together.  A sequence of haplotype g is homologous to
+ *              R if at least HO_INV_HOM of its alignment to haplotype h is to R; the homologous run of g is the heaviest maximal run
+ *              of such sequences (sequences without alignment to h in between are taken along).  This is the move for an event that
+ *              recurs between one haplotype and all others when that haplotype cannot move (e.g. the event sits inside a long
+ *              sequence there);
+ *      move    R is moved (as a block, gaps kept) to where its collinear alignments put it, as is or inverted.
+ *  - Sweep: every candidate is applied, scored and undone.  The qualifying ones (score gain >= HO_INV_MINGAIN, unused weight not
+ *    rising, and more haplotype pairs whose score rises than pairs whose score falls, i.e. supported by most of the haplotypes it is
+ *    compared with) are then tried best first against the current layout and kept if they still qualify.  Sweeps are repeated while anything
+ *    is kept.  Only the haplotype pairs with a piece of a sequence that changed are rescored. 
+ * */
+#define HO_INV_MINLEN  100000.    /* fragments shorter than this (bp) are ignored */
+#define HO_INV_MINW    200000.    /* minimum weight (bp) of a secondary unit that counts as an event */
+#define HO_INV_MINGAIN 100000.    /* minimum gain (bp) of the score to accept a change */
+#define HO_INV_REVCOST 0.2        /* score: a bp of reverse alignment on the chain counts 1 - this */
+#define HO_INV_DEPTH   8          /* atoms: deepest nesting of inversions */
+#define HO_INV_TOL     100000.    /* tolerance (bp) of the range bounds: unaligned ends of a sequence */
+#define HO_INV_MAXRUN  40         /* longest candidate run (sequences) */
+#define HO_INV_HOM     0.5        /* group: share of the alignment to haplotype h a homologous sequence has with the run */
+#define HO_INV_ROUNDS  20         /* maximum number of sweeps */
+#define HO_INV_PAIRTOL 100000.    /* support: a pair whose score changes by less than this (bp) is neutral */
+#define HO_INV_OVL     0.15       /* chain: overlap tolerated at each end of an element, share of its length on that axis ... */
+#define HO_INV_OVLMAX  500000.    /* ... but at most this many bp */
+
+/* piece between haplotypes ha < hb: axis of ha in [xa, xb] <-> axis of hb from ya (at xa) to yb (at xb); d = +1 collinear; sa, sb = sequences */
+typedef struct { double xa, xb, ya, yb, w; int d, ha, hb, sa, sb; } ho_pc_t;
+typedef kvec_t(ho_pc_t) ho_pcv_t;
+typedef struct { double x, y, w, x1, x2, y1, y2; int id; } ho_pt_t;     /* chain element: middle, weight, box */
+typedef struct { double k; int i; } ho_kv_t;
+typedef struct { double x1, x2, y1, y2, w, wf; } ho_box_t;              /* element, atom or unit: box, weight, forward part of the weight */
+typedef struct { double cw, uw, rw; int up, down; } ho_sc_t;            /* score (chain weight - HO_INV_REVCOST x rw), unused weight, reverse weight on the
+                                                                         * chains; for a change: haplotype pairs whose score rose / fell */
+typedef struct {                                                        /* chaining result of one haplotype pair */
+    int i0, n, ne, nu, nch, ha, hb;                                     /* pieces P[i0 .. i0+n), elements, units, primary chain length, haplotypes */
+    int *pel, *eu, *ch;                                                 /* piece -> element; element -> unit (0 = primary); primary elements in order */
+    ho_box_t *el, *un;
+    ho_sc_t sc;                                                         /* contribution to the score */
+} ho_pair_t;
+typedef struct { ho_pcv_t P; kvec_t(ho_pair_t) R; ho_sc_t sc; } ho_an_t;   /* analysis of a layout */
+typedef struct { int h; double B, E; } ho_rg_t;                         /* candidate range on the axis of haplotype h */
+typedef struct { int *o, *off, *rk; } ho_ord_t;                         /* sequences by haplotype and position: o[off[h] .. off[h+1]), rk = index in o */
+typedef struct { int h, a, b, op; } ho_mv_t;                            /* operation op on the run o[a .. b) of haplotype h */
+enum { HO_OP_INV, HO_OP_GROUP, HO_OP_MOVE, HO_OP_MOVEINV, HO_NOP };
+
+static int ho_cmp_pt(const void *p, const void *q)
+{
+    const ho_pt_t *a = p, *b = q;
+    if (a->x != b->x) return a->x < b->x ? -1 : 1;
+    return (a->y > b->y) - (a->y < b->y);
+}
+static int ho_cmp_pair(const void *p, const void *q)
+{
+    const ho_pc_t *a = p, *b = q;
+    if (a->ha != b->ha) return a->ha < b->ha ? -1 : 1;
+    if (a->hb != b->hb) return a->hb < b->hb ? -1 : 1;
+    return (a->xa > b->xa) - (a->xa < b->xa);
+}
+static int ho_cmp_dbl(const void *p, const void *q) { double a = *(const double*)p, b = *(const double*)q; return (a > b) - (a < b); }
+static int ho_cmp_kv(const void *p, const void *q)
+{
+    const ho_kv_t *a = p, *b = q;
+    if (a->k != b->k) return a->k < b->k ? -1 : 1;
+    return (a->i > b->i) - (a->i < b->i);
+}
+static int ho_cmp_mv(const void *p, const void *q)
+{
+    const ho_mv_t *a = p, *b = q;
+    if (a->h != b->h) return a->h - b->h;
+    if (a->a != b->a) return a->a - b->a;
+    return a->b - b->b;
+}
+
+static double ho_mg(double l) { return MIN(HO_INV_OVL * l, HO_INV_OVLMAX); }   /* overlap tolerated at each end of an extent of length l */
+
+static void ho_box_add(ho_box_t *a, const ho_box_t *b)
+{
+    if (a->w <= 0) { *a = *b; return; }
+    a->x1 = MIN(a->x1, b->x1); a->x2 = MAX(a->x2, b->x2); a->y1 = MIN(a->y1, b->y1); a->y2 = MAX(a->y2, b->y2);
+    a->w += b->w; a->wf += b->wf;
+}
+
+/* a lies fully before b on both axes (boxes shrunk as in the chain) */
+static int ho_before(const ho_box_t *a, const ho_box_t *b)
+{
+    return a->x2 - ho_mg(a->x2 - a->x1) <= b->x1 + ho_mg(b->x2 - b->x1) && a->y2 - ho_mg(a->y2 - a->y1) <= b->y1 + ho_mg(b->y2 - b->y1);
+}
+
+/* Heaviest chain of boxes (weighted LIS with a Fenwick tree); sorts p by the x of the middle.  Element j may follow element i if the box
+ * of j starts after the box of i ends on both axes, each box shrunk at both ends by ho_mg().  Sweep along x: an element is inserted
+ * (keyed by the end of its y interval) when the sweep passes the end of its x interval, and queried (inserted elements whose y end is
+ * <= its y start) at its x start.  par[i] = DP predecessor of p[i] (index into p, -1 none), f[i] = weight of the best chain ending at
+ * p[i]; returns the index of the best end (-1 if n == 0). */
+static int ho_chain(ho_pt_t *p, int n, int *par, double *f)
+{
+    double *sx1, *sx2, *sy1, *sy2, *ys, *bw, tot = -1;
+    int *bi, i, m = 0, e = -1, b = 0;
+    ho_kv_t *ka, *kb;
+    if (n <= 0) return -1;
+    qsort(p, n, sizeof(*p), ho_cmp_pt);
+    MYMALLOC(sx1, n); MYMALLOC(sx2, n); MYMALLOC(sy1, n); MYMALLOC(sy2, n); MYMALLOC(ys, n); MYMALLOC(bw, n + 1);
+    MYMALLOC(bi, n + 1); MYMALLOC(ka, n); MYMALLOC(kb, n);
+    if (!sx1 || !sx2 || !sy1 || !sy2 || !ys || !bw || !bi || !ka || !kb) mem_alloc_error("hap order array");
+    for (i = 0; i < n; i++) {
+        double mx = ho_mg(p[i].x2 - p[i].x1), my = ho_mg(p[i].y2 - p[i].y1);
+        sx1[i] = p[i].x1 + mx; sx2[i] = p[i].x2 - mx; sy1[i] = p[i].y1 + my; sy2[i] = p[i].y2 - my;
+        ka[i].k = sx1[i]; ka[i].i = i; kb[i].k = sx2[i]; kb[i].i = i; ys[i] = sy2[i];
+    }
+    qsort(ka, n, sizeof(ho_kv_t), ho_cmp_kv); qsort(kb, n, sizeof(ho_kv_t), ho_cmp_kv);
+    qsort(ys, n, sizeof(double), ho_cmp_dbl);
+    for (i = 0; i < n; i++) if (i == 0 || ys[i] != ys[m - 1]) ys[m++] = ys[i];
+    for (i = 0; i <= m; i++) { bw[i] = 0; bi[i] = -1; }
+    for (i = 0; i < n; i++) {
+        int j = ka[i].i, lo, hi, q, qi = -1;
+        double qw = 0;
+        for (; b < n && kb[b].k <= sx1[j]; b++) {                   /* insert the elements that end before j starts */
+            int t = kb[b].i;
+            lo = 0; hi = m;
+            while (lo < hi) { int mid = (lo + hi) >> 1; if (ys[mid] < sy2[t]) lo = mid + 1; else hi = mid; }
+            for (q = lo + 1; q <= m; q += q & -q) if (bw[q] < f[t]) { bw[q] = f[t]; bi[q] = t; }
+        }
+        lo = 0; hi = m;                                             /* number of keys <= start of the y interval of j */
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (ys[mid] <= sy1[j]) lo = mid + 1; else hi = mid; }
+        for (q = lo; q > 0; q -= q & -q) if (bw[q] > qw) { qw = bw[q]; qi = bi[q]; }
+        f[j] = qw + p[j].w; par[j] = qi;
+        if (f[j] > tot) { tot = f[j]; e = j; }
+    }
+    free(sx1); free(sx2); free(sy1); free(sy2); free(ys); free(bw); free(bi); free(ka); free(kb);
+    return e;
+}
+
+/* forward pieces of p[0..n) with their middle strictly inside the rectangle (x0, x1) x (y0, y1): their weight; *busy if one of them
+ * already belongs to an atom */
+static double ho_rect_fw(const ho_pc_t *p, int n, const int *aid, double x0, double x1, double y0, double y1, int *busy)
+{
+    double fw = 0;
+    int k;
+    *busy = 0;
+    for (k = 0; k < n; k++) {
+        double fx = .5 * (p[k].xa + p[k].xb), fy = .5 * (p[k].ya + p[k].yb);
+        if (p[k].d < 0 || fx <= x0 || fx >= x1 || fy <= y0 || fy >= y1) continue;
+        if (aid[k] >= 0) *busy = 1; else fw += p[k].w;
+    }
+    return fw;
+}
+
+/* Atoms of the pieces p[0..n) of one haplotype pair (sorted by xa), in two stages.
+ *  1. A reverse piece joins the atom it follows (middles in order: x up, y down) with the smallest gap on the two axes if its weight
+ *     is at least the difference of the two gaps and no forward piece lies between them; else it starts a new atom.
+ *  2. Nested re-inversions: two atoms in anti-diagonal order are merged (closest first, repeatedly) if the difference of their gaps is
+ *     at most the weight of the smaller one; the free forward pieces between them are absorbed.
+ * Returns the number of atoms (at[], capacity n); aid[i] = atom of piece i, -1 for a free forward piece. */
+static int ho_atoms(const ho_pc_t *p, int n, ho_box_t *at, int *aid)
+{
+    double *lx, *ly;
+    int i, j, k, na = 0, busy, merged, *map;
+    MYMALLOC(lx, n + 1); MYMALLOC(ly, n + 1); MYMALLOC(map, n + 1);   /* middle of the last piece of each atom */
+    if (!lx || !ly || !map) mem_alloc_error("hap order array");
+    for (i = 0; i < n; i++) aid[i] = -1;
+    for (i = 0; i < n; i++) {                                       /* 1. local chains of reverse pieces */
+        double ylo, yhi, mx, my, bg = 0;
+        int bj = -1;
+        if (p[i].d > 0) continue;
+        ylo = MIN(p[i].ya, p[i].yb); yhi = MAX(p[i].ya, p[i].yb);
+        mx = .5 * (p[i].xa + p[i].xb); my = .5 * (ylo + yhi);
+        for (j = 0; j < na; j++) {
+            double gx, gy;
+            if (mx <= lx[j] || my >= ly[j]) continue;
+            gx = MAX(p[i].xa - at[j].x2, 0); gy = MAX(at[j].y1 - yhi, 0);
+            if (fabs(gx - gy) > p[i].w) continue;
+            if (gx > 0 && gy > 0 && (ho_rect_fw(p, n, aid, at[j].x2, p[i].xa, yhi, at[j].y1, &busy) > 0 || busy)) continue;
+            if (bj < 0 || gx + gy < bg) { bj = j; bg = gx + gy; }
+        }
+        if (bj < 0) { at[na] = (ho_box_t){p[i].xa, p[i].xb, ylo, yhi, p[i].w, 0}; bj = na++; }
+        else { ho_box_t b = {p[i].xa, p[i].xb, ylo, yhi, p[i].w, 0}; ho_box_add(&at[bj], &b); }
+        aid[i] = bj; lx[bj] = mx; ly[bj] = my;
+    }
+    do {                                                            /* 2. nested re-inversions */
+        merged = 0;
+        for (j = 0; j < na; j++) {
+            double bg = 0, bf = 0;
+            int bk = -1;
+            if (at[j].w <= 0) continue;
+            for (k = 0; k < na; k++) {                              /* k after j: x up, y down */
+                double gx, gy, fw, mw;
+                if (k == j || at[k].w <= 0 || at[k].x1 + at[k].x2 <= at[j].x1 + at[j].x2 || at[k].y1 + at[k].y2 >= at[j].y1 + at[j].y2) continue;
+                gx = MAX(at[k].x1 - at[j].x2, 0); gy = MAX(at[j].y1 - at[k].y2, 0); mw = MIN(at[j].w, at[k].w);
+                if (fabs(gx - gy) > mw) continue;
+                fw = ho_rect_fw(p, n, aid, at[j].x2, at[k].x1, at[k].y2, at[j].y1, &busy);
+                if (busy) continue;
+                if (bk < 0 || gx + gy < bg) { bk = k; bg = gx + gy; bf = fw; }
+            }
+            if (bk < 0) continue;
+            if (bf > 0)                                             /* absorb the nested forward pieces */
+                for (i = 0; i < n; i++) {
+                    double fx = .5 * (p[i].xa + p[i].xb), fy = .5 * (p[i].ya + p[i].yb);
+                    if (p[i].d > 0 && aid[i] < 0 && fx > at[j].x2 && fx < at[bk].x1 && fy > at[bk].y2 && fy < at[j].y1) {
+                        ho_box_t b = {p[i].xa, p[i].xb, p[i].ya, p[i].yb, p[i].w, p[i].w}; ho_box_add(&at[j], &b); aid[i] = j;
+                    }
+                }
+            for (i = 0; i < n; i++) if (aid[i] == bk) aid[i] = j;
+            ho_box_add(&at[j], &at[bk]); at[bk].w = 0; merged = 1;
+        }
+    } while (merged);
+    for (j = 0, k = 0; j < na; j++) { map[j] = at[j].w > 0 ? k : -1; if (at[j].w > 0) at[k++] = at[j]; }
+    for (i = 0; i < n; i++) if (aid[i] >= 0) aid[i] = map[aid[i]];
+    free(lx); free(ly); free(map);
     return k;
 }
 
-/* (re)build nodes from the current cuts; orientations/positions are reset */
-static void ho_build(ho_ctx_t *M)
+/* elements, chain and units of the pieces p[0..n) of one haplotype pair; depth: nesting level (0 = the layout) */
+static void ho_pair_build_d(const ho_pc_t *p, int n, ho_pair_t *r, int depth);
+static void ho_pair_build(const ho_pc_t *p, int n, ho_pair_t *r) { ho_pair_build_d(p, n, r, 0); }
+
+static void ho_pair_free(ho_pair_t *r) { free(r->pel); free(r->eu); free(r->ch); free(r->el); free(r->un); }
+
+/* Weight of the atoms at[0..na) of the pieces p[0..n) (aid: piece -> atom): the pieces of an atom are mirrored (y negated, strands
+ * reversed) and chained like a haplotype pair, so a nested re-inversion is an atom inside it, to any depth.  The atom is the primary
+ * chain found there: its box, its weight, and as forward weight the part that is reverse inside it; its other pieces are released
+ * (aid = -1) and become elements of their own. */
+static void ho_atom_weigh(const ho_pc_t *p, int n, ho_box_t *at, int na, int *aid, int depth)
 {
-    int c, k, i, nb = (int)kv_size(M->B);
-    M->nn = 0;
-    for (c = 0; c < M->ns; c++) { M->noff[c] = M->nn; M->nn += NCUT(M, c) - 1; }
-    M->noff[M->ns] = M->nn;
-    HO_ENS(M, nseq, M->nn + 1); HO_ENS(M, nk, M->nn + 1); HO_ENS(M, ori, M->nn + 1); HO_ENS(M, x, M->nn + 1);
-    MYBZERO(M->ori, M->nn); MYBZERO(M->x, M->nn);
-    for (c = 0; c < M->ns; c++)
-        for (k = 0; k < NCUT(M, c) - 1; k++) { M->nseq[M->noff[c] + k] = c; M->nk[M->noff[c] + k] = k; }
-    for (i = 0; i < nb; i++) {
-        ho_blk_t *b = &kv_A(M->B, i);
-        b->na = M->noff[b->a] + ho_seg_of(M, b->a, b->ma);
-        b->nb = M->noff[b->b] + ho_seg_of(M, b->b, b->mb);
+    ho_pc_t *q;
+    int *mem, i, j, m;
+    if (depth >= HO_INV_DEPTH) return;
+    MYMALLOC(q, n + 1); MYMALLOC(mem, n + 1);
+    if (!q || !mem) mem_alloc_error("hap order array");
+    for (j = 0; j < na; j++) {
+        ho_pair_t s;
+        for (i = 0, m = 0; i < n; i++)
+            if (aid[i] == j) { q[m] = p[i]; q[m].ya = -p[i].ya; q[m].yb = -p[i].yb; q[m].d = -p[i].d; mem[m++] = i; }
+        if (m == n && depth > 0) continue;                      /* no smaller nesting: weighed as grouped */
+        ho_pair_build_d(q, m, &s, depth + 1);
+        at[j].w = 0;
+        for (i = 0; i < m; i++) {
+            const ho_pc_t *a = &p[mem[i]];
+            ho_box_t b = {a->xa, a->xb, MIN(a->ya, a->yb), MAX(a->ya, a->yb), a->w, 0};
+            if (s.eu[s.pel[i]] == 0) ho_box_add(&at[j], &b); else aid[mem[i]] = -1;
+        }
+        at[j].wf = s.un[0].w - s.un[0].wf;
+        ho_pair_free(&s);
+    }
+    free(q); free(mem);
+}
+
+static void ho_pair_build_d(const ho_pc_t *p, int n, ho_pair_t *r, int depth)
+{
+    ho_box_t *at;
+    ho_pt_t *pt;
+    ho_kv_t *o;
+    double *f;
+    int *aid, *par, i, j, k, e, nf = 0, na;
+    MYMALLOC(at, n + 1); MYMALLOC(aid, n + 1); MYMALLOC(pt, n + 1); MYMALLOC(o, n + 1); MYMALLOC(f, n + 1); MYMALLOC(par, n + 1);
+    MYMALLOC(r->pel, n + 1); MYMALLOC(r->eu, n + 1); MYMALLOC(r->ch, n + 1); MYMALLOC(r->el, n + 1); MYMALLOC(r->un, n + 1);
+    if (!at || !aid || !pt || !o || !f || !par || !r->pel || !r->eu || !r->ch || !r->el || !r->un) mem_alloc_error("hap order array");
+    r->n = n; r->nu = r->nch = 0;
+    na = ho_atoms(p, n, at, aid);
+    ho_atom_weigh(p, n, at, na, aid, depth);
+    for (i = 0; i < n; i++)                                         /* elements: free pieces, then atoms */
+        if (aid[i] < 0) { r->el[nf] = (ho_box_t){p[i].xa, p[i].xb, MIN(p[i].ya, p[i].yb), MAX(p[i].ya, p[i].yb), p[i].w, p[i].d > 0 ? p[i].w : 0}; r->pel[i] = nf++; }
+    for (j = 0; j < na; j++) r->el[nf + j] = at[j];
+    for (i = 0; i < n; i++) if (aid[i] >= 0) r->pel[i] = nf + aid[i];
+    r->ne = nf + na;
+    for (k = 0; k < r->ne; k++) {
+        const ho_box_t *b = &r->el[k];
+        pt[k] = (ho_pt_t){.5 * (b->x1 + b->x2), .5 * (b->y1 + b->y2), b->w, b->x1, b->x2, b->y1, b->y2, k};
+        r->eu[k] = -1;
+    }
+    e = ho_chain(pt, r->ne, par, f);
+    for (i = e; i >= 0; i = par[i]) r->nch++;                       /* primary chain = unit 0 */
+    for (i = e, k = r->nch; i >= 0; i = par[i]) { r->ch[--k] = pt[i].id; r->eu[pt[i].id] = 0; }
+    if (e >= 0) r->nu = 1;
+    for (k = 0; k < r->ne; k++) { o[k].k = -f[k]; o[k].i = k; }     /* secondary subchains: highest DP score first, backtrack to an assigned element */
+    qsort(o, r->ne, sizeof(ho_kv_t), ho_cmp_kv);
+    for (k = 0; k < r->ne; k++) {
+        if (r->eu[pt[o[k].i].id] >= 0) continue;
+        for (i = o[k].i; i >= 0 && r->eu[pt[i].id] < 0; i = par[i]) r->eu[pt[i].id] = r->nu;
+        r->nu++;
+    }
+    for (k = 0; k < r->nu; k++) r->un[k].w = 0;
+    for (k = 0; k < r->ne; k++) ho_box_add(&r->un[r->eu[k]], &r->el[k]);
+    r->sc = (ho_sc_t){0, 0, 0, 0, 0};                               /* contribution to the score */
+    if (r->nu) { r->sc.rw = r->un[0].w - r->un[0].wf; r->sc.cw = r->un[0].w - HO_INV_REVCOST * r->sc.rw; }
+    for (k = 1; k < r->nu; k++) if (r->un[k].w >= HO_INV_MINW) r->sc.uw += r->un[k].w;
+    if (n) { r->ha = p[0].ha; r->hb = p[0].hb; }
+    free(at); free(aid); free(pt); free(o); free(f); free(par);
+}
+
+
+/* the pieces of the layout (strands and positions of M) of the haplotype pairs that involve a haplotype in mask and, if pm, are marked
+ * in pm (indexed by ha * (ploidy + 1) + hb, ha < hb), sorted by pair */
+static void ho_pieces(const ho_ctx_t *M, ho_pcv_t *P, uint64 mask, const uint8 *pm)
+{
+    int k, f, pl = M->ploidy;
+    P->n = 0;
+    for (k = 0; k < (int) kv_size(M->E); k++) {
+        const ho_e_t *e = &kv_A(M->E, k);
+        const ovl_t *o = e->o;
+        int a = e->a, b = e->b, ha = M->hap[a], hb = M->hap[b], nf = o->nfrag;
+        if (ha < 1 || ha > pl || hb < 1 || hb > pl || ha == hb || !((mask >> (ha & 63) | mask >> (hb & 63)) & 1)) continue;
+        if (pm && !pm[MIN(ha, hb) * (pl + 1) + MAX(ha, hb)]) continue;
+        for (f = 0; f < (nf ? nf : 1); f++) {
+            int ab = nf ? o->frags[f].abpos : o->abpos, ae = nf ? o->frags[f].aepos : o->aepos;
+            int bb = nf ? o->frags[f].bbpos : o->bbpos, be = nf ? o->frags[f].bepos : o->bepos;
+            int rel = nf ? (o->frags[f].rev != 0) : e->raw, d = ((M->rev[a] ^ M->rev[b]) == rel) ? 1 : -1;
+            double w = MIN(ae - ab, be - bb);
+            double xa[2] = {M->rev[a] ? M->pos[a] + M->slen[a] - ab : M->pos[a] + ab, M->rev[a] ? M->pos[a] + M->slen[a] - ae : M->pos[a] + ae};
+            double xb[2] = {M->rev[b] ? M->pos[b] + M->slen[b] - bb : M->pos[b] + bb, M->rev[b] ? M->pos[b] + M->slen[b] - be : M->pos[b] + be};
+            ho_pc_t p;
+            if (w < HO_INV_MINLEN) continue;
+            if (xa[0] > xa[1]) HO_SWAPD(xa[0], xa[1]);
+            if (xb[0] > xb[1]) HO_SWAPD(xb[0], xb[1]);
+            if (xa[1] <= xa[0] || xb[1] <= xb[0]) continue;
+            p = (ho_pc_t){xa[0], xa[1], d > 0 ? xb[0] : xb[1], d > 0 ? xb[1] : xb[0], w, d, ha, hb, a, b};
+            if (ha > hb) {                                      /* seen from the lower haplotype */
+                ho_pc_t q = {MIN(p.ya, p.yb), MAX(p.ya, p.yb), d > 0 ? p.xa : p.xb, d > 0 ? p.xb : p.xa, w, d, hb, ha, b, a};
+                p = q;
+            }
+            kv_push(ho_pc_t, *P, p);
+        }
+    }
+    if (P->n) qsort(P->a, P->n, sizeof(ho_pc_t), ho_cmp_pair);
+}
+
+static void ho_an_clear(ho_an_t *A)
+{
+    size_t i;
+    for (i = 0; i < A->R.n; i++) ho_pair_free(&A->R.a[i]);
+    A->R.n = 0;
+}
+static void ho_an_destroy(ho_an_t *A) { ho_an_clear(A); kv_destroy(A->R); kv_destroy(A->P); }
+
+static void ho_sc_add(ho_sc_t *a, const ho_sc_t *b, double f) { a->cw += f * b->cw; a->uw += f * b->uw; a->rw += f * b->rw; }
+
+/* pieces, chains, units and score of the current layout */
+static void ho_analyse(const ho_ctx_t *M, ho_an_t *A)
+{
+    size_t i, j, n;
+    ho_an_clear(A);
+    ho_pieces(M, &A->P, ~0ULL, NULL);
+    n = kv_size(A->P);
+    A->sc = (ho_sc_t){0, 0, 0, 0, 0};
+    for (i = 0; i < n; i = j) {
+        ho_pair_t r;
+        for (j = i; j < n && A->P.a[j].ha == A->P.a[i].ha && A->P.a[j].hb == A->P.a[i].hb; j++) ;
+        ho_pair_build(A->P.a + i, (int) (j - i), &r); r.i0 = (int) i;
+        ho_sc_add(&A->sc, &r.sc, 1);
+        kv_push(ho_pair_t, A->R, r);
     }
 }
 
-/* start a group: cuts = [0, len] for every sequence, then nodes */
-static void ho_model_reset(ho_ctx_t *M)
+/* change of the score from the analysed layout A to the current one, if only the sequences marked in chg (of the haplotypes in mask)
+ * changed: only the pairs with a piece of one of them are rebuilt; d.up / d.down count the pairs whose score rose / fell by at least
+ * HO_INV_PAIRTOL.  Q: scratch. */
+static ho_sc_t ho_rescore(const ho_ctx_t *M, const ho_an_t *A, uint64 mask, const uint8 *chg, ho_pcv_t *Q)
 {
-    int c;
-    for (c = 0; c < M->ns; c++) {
-        M->cuts[c].n = 0;
-        kv_push(int, M->cuts[c], 0);
-        kv_push(int, M->cuts[c], M->slen[c]);
+    ho_sc_t d = {0, 0, 0, 0, 0};
+    int pl = M->ploidy + 1, k;
+    double *pd;
+    uint8 *pm;
+    size_t i, j, n;
+    if (M->ploidy >= 63) mask = ~0ULL;
+    MYMALLOC(pd, pl * pl); MYMALLOC(pm, pl * pl);
+    if (!pd || !pm) mem_alloc_error("hap order array");
+    for (k = 0; k < pl * pl; k++) pd[k] = 0, pm[k] = 0;
+    for (i = 0; i < A->R.n; i++) {                              /* the pairs with a piece of a changed sequence */
+        const ho_pair_t *r = &A->R.a[i];
+        if (!((mask >> r->ha | mask >> r->hb) & 1)) continue;
+        for (k = 0; k < r->n; k++) { const ho_pc_t *p = &A->P.a[r->i0 + k]; if (chg[p->sa] || chg[p->sb]) break; }
+        if (k == r->n) continue;
+        pm[r->ha * pl + r->hb] = 1; ho_sc_add(&d, &r->sc, -1); pd[r->ha * pl + r->hb] -= r->sc.cw;
     }
-    ho_build(M);
+    ho_pieces(M, Q, mask, pm);
+    n = kv_size(*Q);
+    for (i = 0; i < n; i = j) {
+        ho_pair_t r;
+        for (j = i; j < n && Q->a[j].ha == Q->a[i].ha && Q->a[j].hb == Q->a[i].hb; j++) ;
+        ho_pair_build(Q->a + i, (int) (j - i), &r);
+        ho_sc_add(&d, &r.sc, 1); pd[r.ha * pl + r.hb] += r.sc.cw;
+        ho_pair_free(&r);
+    }
+    for (k = 0; k < pl * pl; k++) { if (pd[k] >= HO_INV_PAIRTOL) d.up++; else if (pd[k] <= -HO_INV_PAIRTOL) d.down++; }
+    free(pd); free(pm);
+    return d;
 }
 
-static void ho_add_cuts(ho_ctx_t *M, int c, const int *v, int nv)
+/* a change qualifies: score gain >= HO_INV_MINGAIN, unused weight not rising, and more haplotype pairs better than worse */
+static int ho_qualifies(const ho_sc_t *d) { return d->cw >= HO_INV_MINGAIN && d->uw <= 1 && d->up > d->down; }
+
+/* sequences of every haplotype in layout order */
+static void ho_order(const ho_ctx_t *M, ho_ord_t *O)
 {
-    int i, j;
-    for (i = 0; i < nv; i++) kv_push(int, M->cuts[c], v[i]);
-    qsort(M->cuts[c].a, M->cuts[c].n, sizeof(int), ho_cmp_int);
-    for (i = j = 1; i < NCUT(M, c); i++) if (CUT(M, c, i) != CUT(M, c, j - 1)) CUT(M, c, j++) = CUT(M, c, i);
-    M->cuts[c].n = j;
+    int i, h, n = 0;
+    for (i = 0; i < M->ns; i++) if (M->hap[i] >= 1 && M->hap[i] <= M->ploidy) O->o[n++] = i;
+    ho_ref = M; qsort(O->o, n, sizeof(int), ho_cmp_hap_pos);
+    for (h = 0, i = 0; h <= M->ploidy + 1; h++) { while (i < n && M->hap[O->o[i]] < h) i++; O->off[h] = i; }
+    for (i = 0; i < M->ns; i++) O->rk[i] = -1;
+    for (i = 0; i < n; i++) O->rk[O->o[i]] = i;
 }
 
-/* orientation: max spanning forest of aggregated block weights + greedy flip local search */
-static int ho_cmp_agg_key(const void *p, const void *q)
+/* candidate ranges: for every event, the range between its flanks on the primary chain, on both axes */
+static int ho_ranges(const ho_an_t *A, ho_rg_t **rg)
 {
-    const ho_agg_t *x = p, *y = q;
-    if (x->a != y->a) return x->a < y->a ? -1 : 1;
-    if (x->b != y->b) return x->b < y->b ? -1 : 1;
-    return 0;
-}
-static int ho_cmp_agg_tot(const void *p, const void *q)   /* total desc, then key desc */
-{
-    const ho_agg_t *x = p, *y = q;
-    int64 tx = x->w0 + x->w1, ty = y->w0 + y->w1;
-    if (tx != ty) return tx > ty ? -1 : 1;
-    if (x->a != y->a) return x->a > y->a ? -1 : 1;
-    if (x->b != y->b) return x->b > y->b ? -1 : 1;
-    return 0;
-}
-static int ho_cmp_li(const void *p, const void *q)
-{
-    const ho_li_t *x = p, *y = q;
-    if (x->len != y->len) return x->len > y->len ? -1 : 1;
-    return (x->idx > y->idx) - (x->idx < y->idx);
-}
-static int ho_find(int *par, int x)
-{
-    while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; }
-    return x;
-}
-static int64 ho_flip_gain(int u, const int *off, const int *nbr, const int *eid, const ho_agg_t *ag, const uint8 *ori)
-{
-    int64 g = 0; int i;
-    for (i = off[u]; i < off[u + 1]; i++) {
-        int want = ori[u] ^ ori[nbr[i]];
-        const ho_agg_t *e = ag + eid[i];
-        g += want ? (e->w0 - e->w1) : (e->w1 - e->w0);
+    int r, u, i, iP, iS, n = 0, cap = 0;
+    for (r = 0; r < (int) A->R.n; r++) {
+        const ho_pair_t *R = &A->R.a[r];
+        const ho_pc_t *p = A->P.a + R->i0;
+        for (u = 1; u < R->nu; u++) {
+            const ho_box_t *U = &R->un[u], *Pb, *Sb;
+            ho_box_t C = *U;
+            if (U->w < HO_INV_MINW) continue;
+            for (i = 0, iP = -1; i < R->nch; i++) if (ho_before(&R->el[R->ch[i]], U)) iP = i;
+            for (i = iP + 1, iS = R->nch; i < R->nch; i++) if (ho_before(U, &R->el[R->ch[i]])) { iS = i; break; }
+            if (iP < 0 && iS >= R->nch) continue;
+            for (i = iP + 1; i < iS; i++) ho_box_add(&C, &R->el[R->ch[i]]);
+            Pb = iP >= 0 ? &R->el[R->ch[iP]] : NULL; Sb = iS < R->nch ? &R->el[R->ch[iS]] : NULL;
+            if (n + 2 > cap) { cap = cap ? cap << 1 : 32; MYREALLOC(*rg, cap); if (!*rg) mem_alloc_error("hap order array"); }
+            (*rg)[n++] = (ho_rg_t){p[0].ha, Pb ? Pb->x2 : C.x1, Sb ? Sb->x1 : C.x2};
+            (*rg)[n++] = (ho_rg_t){p[0].hb, Pb ? Pb->y2 : C.y1, Sb ? Sb->y1 : C.y2};
+        }
     }
+    return n;
+}
+
+/* weight of the pieces of every sequence that lie in an event (secondary unit >= HO_INV_MINW) */
+static void ho_event_weight(const ho_an_t *A, int ns, double *ev)
+{
+    int r, j;
+    for (j = 0; j < ns; j++) ev[j] = 0;
+    for (r = 0; r < (int) A->R.n; r++) {
+        const ho_pair_t *R = &A->R.a[r];
+        for (j = 0; j < R->n; j++) {
+            const ho_pc_t *p = &A->P.a[R->i0 + j];
+            int u = R->eu[R->pel[j]];
+            if (u > 0 && R->un[u].w >= HO_INV_MINW) { ev[p->sa] += p->w; ev[p->sb] += p->w; }
+        }
+    }
+}
+
+/* candidate runs of at most HO_INV_MAXRUN sequences inside a range: the whole run in it, and every contiguous run that starts or ends
+ * with a sequence carrying event weight (ev); each once */
+static int ho_runs(const ho_ctx_t *M, const ho_ord_t *O, const ho_rg_t *rg, int nrg, const double *ev, ho_mv_t **mv)
+{
+    int g, i, a, b, n = 0, cap = 0;
+    for (g = 0; g < nrg; g++) {
+        int h = rg[g].h, i0 = -1, i1 = -1;
+        for (i = O->off[h]; i < O->off[h + 1]; i++) {
+            int s = O->o[i];
+            if (M->pos[s] < rg[g].B - HO_INV_TOL || M->pos[s] + M->slen[s] > rg[g].E + HO_INV_TOL) continue;
+            if (i0 < 0) i0 = i;
+            i1 = i + 1;
+        }
+        for (a = i0; a >= 0 && a < i1; a++)
+            for (b = a + 1; b <= i1 && b - a <= HO_INV_MAXRUN; b++) {
+                if (ev[O->o[a]] <= 0 && ev[O->o[b - 1]] <= 0 && !(a == i0 && b == i1)) continue;
+                if (n == cap) { cap = cap ? cap << 1 : 256; MYREALLOC(*mv, cap); if (!*mv) mem_alloc_error("hap order array"); }
+                (*mv)[n++] = (ho_mv_t){h, a, b, 0};
+            }
+    }
+    if (n) qsort(*mv, n, sizeof(ho_mv_t), ho_cmp_mv);
+    for (i = 0, g = 0; i < n; i++) if (g == 0 || ho_cmp_mv(&(*mv)[i], &(*mv)[g - 1])) (*mv)[g++] = (*mv)[i];
     return g;
 }
 
-static void ho_orient(ho_ctx_t *M)
+/* mirror the sequences s[0..n) in their own extent: order and strands reversed */
+static void ho_invert(ho_ctx_t *M, const int *s, int n)
 {
-    int n = M->nn, nblk = (int)kv_size(M->B), i, c, k, na = 0, nm = 0, ntree = 0;
-    ho_agg_t *ag, *srt;
-    int *off, *nbr, *eid, *par, *head, *nxt, *to, *ne, *q;
-    uint8 *seen;
-    ho_li_t *L;
-    int64 *g;
+    double B = 1e300, E = -1e300;
+    int i;
+    for (i = 0; i < n; i++) { B = MIN(B, M->pos[s[i]]); E = MAX(E, M->pos[s[i]] + M->slen[s[i]]); }
+    for (i = 0; i < n; i++) { M->rev[s[i]] ^= 1; M->pos[s[i]] = B + E - (M->pos[s[i]] + M->slen[s[i]]); }
+}
 
-    HO_ENS(M, o_ag, nblk + 1); ag = M->o_ag;
-    for (i = 0; i < nblk; i++) {
-        const ho_blk_t *b = &kv_A(M->B, i);
-        ho_agg_t t;
-        if (b->na == b->nb) continue;
-        t.a = MIN(b->na, b->nb); t.b = MAX(b->na, b->nb);
-        t.w0 = b->rel ? 0 : b->w; t.w1 = b->rel ? b->w : 0;
-        ag[na++] = t;
+/* Homologous run in haplotype g of the run o[a..b) of haplotype h (pieces P of the current layout): the heaviest maximal run of
+ * sequences of g that have at least HO_INV_HOM of their alignment to h with the run (sequences without alignment to h are taken along);
+ * its bounds in o go to *ga, *gb.  wr, wh: scratch (ns). */
+static int ho_homolog(const ho_pcv_t *P, const ho_ord_t *O, int h, int a, int b, int g, double *wr, double *wh, int *ga, int *gb)
+{
+    int i, j, k, best = 0;
+    double bw = 0;
+    for (i = O->off[g]; i < O->off[g + 1]; i++) wr[O->o[i]] = wh[O->o[i]] = 0;
+    for (k = 0; k < (int) kv_size(*P); k++) {
+        const ho_pc_t *p = &P->a[k];
+        int s, t;
+        if (p->ha == h && p->hb == g) { s = p->sa; t = p->sb; }
+        else if (p->ha == g && p->hb == h) { s = p->sb; t = p->sa; }
+        else continue;
+        wh[t] += p->w;
+        if (O->rk[s] >= a && O->rk[s] < b) wr[t] += p->w;
     }
-    qsort(ag, na, sizeof(ho_agg_t), ho_cmp_agg_key);
-    for (i = 0; i < na; i++) {
-        if (nm > 0 && ag[nm - 1].a == ag[i].a && ag[nm - 1].b == ag[i].b) { ag[nm - 1].w0 += ag[i].w0; ag[nm - 1].w1 += ag[i].w1; }
-        else ag[nm++] = ag[i];
-    }
-    na = nm;
-    HO_ENS(M, o_off, n + 2); HO_ENS(M, o_q, n + 1); HO_ENS(M, o_nbr, 2 * na + 1); HO_ENS(M, o_eid, 2 * na + 1);
-    off = M->o_off; q = M->o_q; nbr = M->o_nbr; eid = M->o_eid;
-    memset(off, 0, (n + 2) * sizeof(int)); memset(q, 0, (n + 1) * sizeof(int));   /* q: fill counters */
-    for (i = 0; i < na; i++) { off[ag[i].a + 1]++; off[ag[i].b + 1]++; }
-    for (i = 0; i < n; i++) off[i + 1] += off[i];
-    for (i = 0; i < na; i++) {
-        int a = ag[i].a, b = ag[i].b;
-        nbr[off[a] + q[a]] = b; eid[off[a] + q[a]++] = i;
-        nbr[off[b] + q[b]] = a; eid[off[b] + q[b]++] = i;
-    }
-    /* spanning forest: heaviest first */
-    HO_ENS(M, o_srt, na + 1); srt = M->o_srt;
-    memcpy(srt, ag, na * sizeof(ho_agg_t));
-    qsort(srt, na, sizeof(ho_agg_t), ho_cmp_agg_tot);
-    HO_ENS(M, o_par, n + 1); HO_ENS(M, o_head, n + 1);
-    HO_ENS(M, o_nxt, 2 * n + 2); HO_ENS(M, o_to, 2 * n + 2); HO_ENS(M, o_ne, 2 * n + 2);
-    par = M->o_par; head = M->o_head; nxt = M->o_nxt; to = M->o_to; ne = M->o_ne;
-    for (i = 0; i < n; i++) { par[i] = i; head[i] = -1; }
-    for (i = 0; i < na; i++) {
-        int ra = ho_find(par, srt[i].a), rb = ho_find(par, srt[i].b), r = srt[i].w1 > srt[i].w0;
-        if (ra == rb) continue;
-        par[ra] = rb;
-        to[ntree] = srt[i].b; ne[ntree] = r; nxt[ntree] = head[srt[i].a]; head[srt[i].a] = ntree++;
-        to[ntree] = srt[i].a; ne[ntree] = r; nxt[ntree] = head[srt[i].b]; head[srt[i].b] = ntree++;
-    }
-    /* orient each tree from its longest node */
-    HO_ENS(M, o_seen, n + 1); HO_ENS(M, o_L, n + 1); seen = M->o_seen; L = M->o_L;
-    memset(seen, 0, n);
-    for (c = 0; c < M->ns; c++)
-        for (k = 0; k < NCUT(M, c) - 1; k++) {
-            int id = M->noff[c] + k;
-            L[id].len = CUT(M, c, k + 1) - CUT(M, c, k); L[id].idx = id;
+    for (i = O->off[g]; i < O->off[g + 1]; i = j + 1) {        /* maximal runs of homologous sequences, trimmed to aligned ones */
+        double w = 0;
+        int f0 = -1, f1 = -1;
+        for (j = i; j < O->off[g + 1]; j++) {
+            int t = O->o[j];
+            if (wh[t] > 0 && wr[t] < HO_INV_HOM * wh[t]) break;
+            if (wr[t] > 0) { w += wr[t]; if (f0 < 0) f0 = j; f1 = j + 1; }
         }
-    qsort(L, n, sizeof(ho_li_t), ho_cmp_li);
-    for (i = 0; i < n; i++) {
-        int st = L[i].idx, qh = 0, qt = 0;
-        if (seen[st]) continue;
-        seen[st] = 1; M->ori[st] = 0; q[qt++] = st;
-        while (qh < qt) {
-            int u = q[qh++], e;
-            for (e = head[u]; e >= 0; e = nxt[e]) {
-                int v = to[e];
-                if (!seen[v]) { seen[v] = 1; M->ori[v] = M->ori[u] ^ ne[e]; q[qt++] = v; }
+        if (f0 >= 0 && w > bw) { bw = w; *ga = f0; *gb = f1; best = 1; }
+    }
+    return best;
+}
+
+/* Move the run o[a..b) of haplotype h as a rigid block to where its collinear alignments put it (weighted median of the implied
+ * offsets), between the two other sequences of h around that place.  The other sequences of the span between the old and the new place
+ * keep their order and the gaps before them.  Returns 0 if the run stays where it is.  P: the pieces of the analysed layout; if inv,
+ * the run has been inverted in place since (its pieces are mirrored in its extent and change strand). */
+static int ho_move(ho_ctx_t *M, const ho_ord_t *O, int h, int a, int b, const ho_pcv_t *P, int inv)
+{
+    ho_est_t *es;
+    double tot = 0, acc = 0, sh, lo = 1e300, hi = -1e300, mid, cur, g, *gp;
+    int i, k, n = 0, t, s0, s1, first = 1;
+    for (i = a; i < b; i++) { lo = MIN(lo, M->pos[O->o[i]]); hi = MAX(hi, M->pos[O->o[i]] + M->slen[O->o[i]]); }
+    MYMALLOC(es, kv_size(*P) + 1);
+    if (!es) mem_alloc_error("hap order array");
+    for (k = 0; k < (int) kv_size(*P); k++) {                   /* offsets implied by the collinear pieces of the run (inverted: mirrored, strand flipped) */
+        const ho_pc_t *p = &P->a[k];
+        double own, oth;
+        if (p->ha == h && O->rk[p->sa] >= a && O->rk[p->sa] < b) { own = .5 * (p->xa + p->xb); oth = .5 * (p->ya + p->yb); }
+        else if (p->hb == h && O->rk[p->sb] >= a && O->rk[p->sb] < b) { own = .5 * (p->ya + p->yb); oth = .5 * (p->xa + p->xb); }
+        else continue;
+        if ((inv ? -p->d : p->d) < 0) continue;
+        es[n].v = oth - (inv ? lo + hi - own : own); es[n++].w = p->w;
+    }
+    if (n == 0) { free(es); return 0; }
+    qsort(es, n, sizeof(ho_est_t), ho_cmp_est);
+    for (i = 0; i < n; i++) tot += es[i].w;
+    for (i = 0; i < n; i++) { acc += es[i].w; if (acc >= tot / 2) break; }
+    sh = es[i < n ? i : n - 1].v;
+    free(es);
+    mid = .5 * (lo + hi) + sh;
+    for (t = O->off[h]; t < O->off[h + 1]; t++)                 /* the run goes before the first other sequence whose middle lies beyond */
+        if ((t < a || t >= b) && M->pos[O->o[t]] + .5 * M->slen[O->o[t]] > mid) break;
+    if (t == a || t == b) return 0;
+    s0 = MIN(a, t); s1 = MAX(b, t);                             /* span o[s0 .. s1): gaps from the unchanged layout first */
+    MYMALLOC(gp, s1 - s0 + 1);
+    if (!gp) mem_alloc_error("hap order array");
+    for (i = s0; i < s1; i++) {
+        double pe = i == b ? hi : i > O->off[h] ? M->pos[O->o[i - 1]] + M->slen[O->o[i - 1]] : M->pos[O->o[i]];
+        gp[i - s0] = i == a ? (a > O->off[h] ? lo - (M->pos[O->o[a - 1]] + M->slen[O->o[a - 1]]) : 0) : M->pos[O->o[i]] - pe;
+    }
+    cur = s0 == a ? lo : M->pos[O->o[s0]];
+    for (i = s0; i <= s1; i++) {
+        if (i == t) {                                           /* the run, as a block */
+            g = first ? 0 : MAX(gp[a - s0], 0); sh = cur + g - lo;
+            for (k = a; k < b; k++) M->pos[O->o[k]] += sh;
+            cur = hi + sh; first = 0;
+        }
+        if (i < s1 && (i < a || i >= b)) {
+            int s = O->o[i];
+            g = first ? 0 : MAX(gp[i - s0], 0);
+            M->pos[s] = cur + g; cur = M->pos[s] + M->slen[s]; first = 0;
+        }
+    }
+    free(gp);
+    return 1;
+}
+
+/* apply operation v to the layout; returns the number of sequences that changed (0: not applicable), *mask = changed haplotypes */
+static int ho_apply(ho_ctx_t *M, const ho_an_t *A, const ho_ord_t *O, const ho_mv_t *v, ho_pcv_t *P, int *buf, double *wr, double *wh, uint64 *mask)
+{
+    int g, ga, gb, n = v->b - v->a;
+    *mask = 1ULL << (v->h & 63);
+    if (v->op == HO_OP_INV) { ho_invert(M, O->o + v->a, n); return n; }
+    if (v->op == HO_OP_GROUP) {                                 /* homologous runs first, from the analysis of the unchanged layout */
+        int ng = 0;
+        for (g = 1; g <= M->ploidy; g++)
+            if (g != v->h && ho_homolog(&A->P, O, v->h, v->a, v->b, g, wr, wh, &ga, &gb)) { buf[2 * ng] = ga; buf[2 * ng + 1] = gb; ng++; }
+        if (ng == 0) return 0;
+        for (g = 0; g < ng; g++) {
+            ho_invert(M, O->o + buf[2 * g], buf[2 * g + 1] - buf[2 * g]); n += buf[2 * g + 1] - buf[2 * g];
+            *mask |= 1ULL << (M->hap[O->o[buf[2 * g]]] & 63);
+        }
+        ho_invert(M, O->o + v->a, v->b - v->a);
+        return n;
+    }
+    if (v->op == HO_OP_MOVEINV) ho_invert(M, O->o + v->a, n);
+    return ho_move(M, O, v->h, v->a, v->b, &A->P, v->op == HO_OP_MOVEINV) ? n : 0;
+}
+
+typedef struct { ho_mv_t v; int s0, s1; ho_sc_t d; } ho_cand_t;      /* qualifying candidate: run from sequence s0 to s1, change of the score */
+static int ho_cmp_cand(const void *p, const void *q)
+{
+    const ho_cand_t *a = p, *b = q;
+    if (a->d.cw != b->d.cw) return a->d.cw > b->d.cw ? -1 : 1;
+    return (a->v.b - a->v.a) - (b->v.b - b->v.a);
+}
+
+/* Sweep: every candidate is applied, scored and undone.  The qualifying ones (gain >= HO_INV_MINGAIN, unused weight not rising) are
+ * then tried in order of gain against the current layout and kept if they still qualify; a new sweep follows if anything was kept. */
+static void ho_invfix(ho_ctx_t *M)
+{
+    int ns = M->ns, sw, nrg, nmv, nq, i, op, n, nacc, *buf;
+    uint64 mask;
+    double *bpos, *wr, *wh;
+    uint8 *brev, *chg;
+    ho_rg_t *rg = NULL;
+    ho_mv_t *mv = NULL;
+    kvec_t(ho_cand_t) Q;
+    ho_ord_t O;
+    ho_pcv_t P;
+    ho_an_t A;
+    if (M->ploidy < 2) return;
+    MYBZERO(&A, 1); kv_init(P); kv_init(Q);
+    MYMALLOC(bpos, ns); MYMALLOC(brev, ns); MYMALLOC(chg, ns); MYMALLOC(wr, ns + 1); MYMALLOC(wh, ns + 1); MYMALLOC(buf, 2 * (ns + M->ploidy) + 2);
+    MYMALLOC(O.o, ns + 1); MYMALLOC(O.off, M->ploidy + 3); MYMALLOC(O.rk, ns + 1);
+    if (!bpos || !brev || !chg || !wr || !wh || !buf || !O.o || !O.off || !O.rk) mem_alloc_error("hap order array");
+    ho_analyse(M, &A);
+    for (sw = 0; sw < HO_INV_ROUNDS; sw++) {
+        ho_order(M, &O);                                        /* sweep */
+        nrg = ho_ranges(&A, &rg);
+        ho_event_weight(&A, ns, wr);
+        nmv = ho_runs(M, &O, rg, nrg, wr, &mv);
+        Q.n = 0;
+        for (i = 0; i < nmv; i++)
+            for (op = 0; op < HO_NOP; op++) {
+                ho_cand_t c = {mv[i], O.o[mv[i].a], O.o[mv[i].b - 1]};
+                c.v.op = op;
+                memcpy(bpos, M->pos, ns * sizeof(double)); memcpy(brev, M->rev, ns);
+                n = ho_apply(M, &A, &O, &c.v, &P, buf, wr, wh, &mask);
+                if (n > 0) { int k_; for (k_ = 0; k_ < ns; k_++) chg[k_] = M->pos[k_] != bpos[k_] || M->rev[k_] != brev[k_]; c.d = ho_rescore(M, &A, mask, chg, &P); }
+                memcpy(M->pos, bpos, ns * sizeof(double)); memcpy(M->rev, brev, ns);
+                if (n == 0) continue;
+                if (ho_qualifies(&c.d)) kv_push(ho_cand_t, Q, c);
             }
+        if (Q.n) qsort(Q.a, Q.n, sizeof(ho_cand_t), ho_cmp_cand);
+        for (nq = 0, nacc = 0; nq < (int) Q.n; nq++) {          /* the qualifying ones against the current layout, best first */
+            ho_cand_t c = Q.a[nq];
+            int len = c.v.b - c.v.a;
+            ho_sc_t d = {0, 0, 0, 0, 0};
+            ho_order(M, &O);
+            c.v.a = MIN(O.rk[c.s0], O.rk[c.s1]); c.v.b = MAX(O.rk[c.s0], O.rk[c.s1]) + 1;
+            if (c.v.b - c.v.a != len) continue;                 /* the run was broken up by an earlier change */
+            memcpy(bpos, M->pos, ns * sizeof(double)); memcpy(brev, M->rev, ns);
+            n = ho_apply(M, &A, &O, &c.v, &P, buf, wr, wh, &mask);
+            if (n > 0) { int k_; for (k_ = 0; k_ < ns; k_++) chg[k_] = M->pos[k_] != bpos[k_] || M->rev[k_] != brev[k_]; d = ho_rescore(M, &A, mask, chg, &P); }
+            if (n == 0 || !ho_qualifies(&d)) { memcpy(M->pos, bpos, ns * sizeof(double)); memcpy(M->rev, brev, ns); continue; }
+            ho_analyse(M, &A); nacc++;
         }
+        if (nacc == 0) break;
     }
-    /* greedy local search: flip the node with the best gain */
-    HO_ENS(M, o_g, n + 1); g = M->o_g;
-    for (i = 0; i < n; i++) g[i] = ho_flip_gain(i, off, nbr, eid, ag, M->ori);
-    for (;;) {
-        int best = -1, j; int64 bg = 0;
-        for (i = 0; i < n; i++) if (g[i] > bg) { bg = g[i]; best = i; }
-        if (best < 0) break;
-        M->ori[best] ^= 1;
-        g[best] = ho_flip_gain(best, off, nbr, eid, ag, M->ori);
-        for (j = off[best]; j < off[best + 1]; j++) g[nbr[j]] = ho_flip_gain(nbr[j], off, nbr, eid, ag, M->ori);
-    }
+    ho_an_destroy(&A); kv_destroy(P); kv_destroy(Q);
+    free(rg); free(mv); free(bpos); free(brev); free(chg); free(wr); free(wh); free(buf); free(O.o); free(O.off); free(O.rk);
 }
 
-/* split: cut nodes where a contiguous stretch prefers the opposite orientation */
-static int ho_cmp_item(const void *p, const void *q)
+/* Lay out the current group (M->ns sequences, evidence already built) */
+/* Every sequence gets a strand and an offset in one frame shared by all haplotypes.  A sequence's placement is a map of its
+ * coordinates into the frame (mirrored or not, shifted); the alignments between two sequences measure the relative map between them,
+ * and the backbone is the assignment that agrees with most of the alignment weight (a synchronization problem).
+ *  - Readings (ho_sync_readings): for every pair of sequences of different haplotypes, the fragments of >= HO_SYNC_MINLEN are chained
+ *    per relative strand (heaviest collinear chain, overlap tolerance as in the inversion score).  Each chain is one reading: relative
+ *    strand, weight, and its fragments, which give the relative offset.  A pair across an inversion has a reading on each strand.
+ *  - Clusters: every sequence starts as a cluster of its own.  For two clusters, every reading between them proposes a map of one
+ *    into the frame of the other (mirror, shift).  Shifts that differ only by empty space are the same placement: proposals of the
+ *    same mirror agree if moving from one shift to the other makes no sequence cross a sequence of its own haplotype by more than
+ *    the junction allowance (ho_mg), and a reading supports a shift only while its alignment still lines up there (the shift within
+ *    half its aligned lengths); the agreeing proposals form a group (ho_sync_group).  A group
+ *    scores its weight minus HO_SYNC_PEN x the overlap it would create between sequences of the same haplotype (a haplotype runs once
+ *    along the frame, so its sequences cannot overlap; this is what tells the two readings of an inversion apart when the alignments
+ *    alone are symmetric).  The pair of clusters with the best group score is merged (the smaller cluster is moved into the frame of
+ *    the larger one), repeatedly, while a positive score is left.  The overlap is computed from per-cluster, per-haplotype lists of
+ *    the sequences sorted by position, kept up to date on every merge.
+ *  - Clusters still apart are then joined to the largest one by their best-supported map, largest first, regardless of overlap
+ *    (the overlap removal below resolves it).
+ *  - Refinement: every sequence takes the heaviest group of the (strand, offset) proposals of all its readings within its cluster,
+ *    repeatedly, until nothing moves; the longest sequence is then made forward.  Here proposals agree when their alignments line up
+ *    (no crossing test: the neighbours' positions are provisional, sequences of a haplotype still overlap before unpile/project). */
+#define HO_SYNC_MINLEN 30000.     /* fragments shorter than this (bp) are not used */
+#define HO_SYNC_PEN    1.0        /* cost of a bp of same-haplotype overlap against a bp of alignment weight */
+#define HO_SYNC_ROUNDS 30         /* refinement rounds */
+
+typedef struct { int a, b, rel, f0, nf; double w, sl; } ho_rd_t;      /* reading: a, b, relative strand, fragments F[f0 .. f0+nf), weight,
+                                                                         * slack: half its aligned lengths on a and b */
+typedef struct { double pa, pb, w; } ho_rf_t;                           /* fragment of a reading: middle on a, on b, weight */
+typedef struct { double a0, a1, b0, b1, w; } ho_fr_t;
+typedef struct { int m; double t, w, sl; } ho_pr_t;                     /* proposal: mirror (or strand), shift (or offset), weight, slack */
+typedef struct { double sc; int A, B, va, vb, m; double t; } ho_mg_t;  /* merge candidate: move B by (m, t) into A's frame */
+typedef kvec_t(int) ho_ivv_t;
+typedef struct {
+    kvec_t(ho_rd_t) R; kvec_t(ho_rf_t) F; kvec_t(ho_pr_t) P; kvec_t(ho_est_t) T; kvec_t(ho_mg_t) H;
+    int *roff, *radj;                       /* readings of each sequence (CSR) */
+    int *cl, *next, *head, *tail, *ver, *mark, stamp;
+    double *clen;
+    ho_ivv_t *iv;                           /* per cluster and haplotype (c * (ploidy + 1) + h): its sequences sorted by position */
+    double *ivmax;                          /* ... and the longest of them */
+} ho_sync_t;
+
+static const double *ho_pref;
+static int ho_cmp_pos(const void *p, const void *q)
 {
-    const ho_item_t *x = p, *y = q;
-    if (x->mid != y->mid) return x->mid < y->mid ? -1 : 1;
-    if (x->w != y->w) return x->w < y->w ? -1 : 1;
-    if (x->want != y->want) return x->want < y->want ? -1 : 1;
-    if (x->ab != y->ab) return x->ab < y->ab ? -1 : 1;
-    if (x->ae != y->ae) return x->ae < y->ae ? -1 : 1;
-    return 0;
+    double a = ho_pref[*(const int*)p], b = ho_pref[*(const int*)q];
+    return (a > b) - (a < b);
 }
 
-/* cut position minimising aligned bp on the wrong side, inside window [wlo,whi]; cd = scratch (>= 2*ni ints) */
-static int ho_refine(const ho_item_t *it, int ni, int *cd, int lo, int hi, int Ll, int Lr, int cmin, int wlo, int whi, int *out)
-{
-    int lb = MAX(lo, MAX(cmin, wlo)), ub = MIN(hi, whi);
-    int nc = 0, i, j, found = 0;
-    int64 bc = 0;
-    for (i = 0; i < ni; i++) {
-        if (it[i].ab > lb && it[i].ab < ub) cd[nc++] = it[i].ab;
-        if (it[i].ae > lb && it[i].ae < ub) cd[nc++] = it[i].ae;
-    }
-    qsort(cd, nc, sizeof(int), ho_cmp_int);
-    for (i = j = 0; i < nc; i++) if (j == 0 || cd[i] != cd[j - 1]) cd[j++] = cd[i];
-    nc = j;
-    for (i = 0; i < nc; i++) {
-        int c = cd[i], t; int64 cost = 0;
-        for (t = 0; t < ni; t++) {
-            int a_ = MAX(it[t].ab, wlo), e_ = MIN(it[t].ae, whi), l, r;
-            if (e_ <= a_) continue;
-            l = MIN(e_, c) - a_; if (l < 0) l = 0;
-            r = e_ - MAX(a_, c); if (r < 0) r = 0;
-            if (it[t].want != Ll) cost += l;
-            if (it[t].want != Lr) cost += r;
-        }
-        if (!found || cost < bc) { bc = cost; *out = c; found = 1; }
-    }
-    return found;
-}
-
-static int ho_cand_gt(const ho_ctx_t *M, const ho_cand_t *x, const ho_cand_t *y)
-{
-    int i, n, s;
-    if (x->best != y->best) return x->best > y->best;
-    s = strcmp(HO_NAME(M, x->seq), HO_NAME(M, y->seq));
-    if (s) return s > 0;
-    n = MIN(x->ncl, y->ncl);
-    for (i = 0; i < n; i++) if (x->cl[i] != y->cl[i]) return x->cl[i] > y->cl[i];
-    return x->ncl > y->ncl;
-}
-
-static int ho_split(ho_ctx_t *M, double min_gain)
-{
-    int n = M->nn, nblk = (int)kv_size(M->B), i, u, added = 0, have = 0;
-    int *off, *pos, *cd;
-    ho_item_t *it;
-    ho_cand_t bestc;
-    memset(&bestc, 0, sizeof(bestc));
-    HO_ENS(M, o_off, n + 2); HO_ENS(M, o_q, n + 1);         /* scratch shared with ho_orient */
-    off = M->o_off; pos = M->o_q;
-    memset(off, 0, (n + 2) * sizeof(int)); memset(pos, 0, (n + 1) * sizeof(int));
-    for (i = 0; i < nblk; i++) {
-        const ho_blk_t *b = &kv_A(M->B, i);
-        if (b->na != b->nb) { off[b->na + 1]++; off[b->nb + 1]++; }
-    }
-    for (i = 0; i < n; i++) off[i + 1] += off[i];
-    HO_ENS(M, s_it, off[n] + 1); HO_ENS(M, s_cd, 2 * off[n] + 1);
-    it = M->s_it; cd = M->s_cd;
-    for (i = 0; i < nblk; i++) {
-        const ho_blk_t *b = &kv_A(M->B, i); ho_item_t t;
-        if (b->na == b->nb) continue;
-        t.mid = b->ma; t.w = b->w; t.want = M->ori[b->nb] ^ b->rel; t.ab = b->ab; t.ae = b->ae;
-        it[off[b->na] + pos[b->na]++] = t;
-        t.mid = b->mb; t.want = M->ori[b->na] ^ b->rel; t.ab = b->bb; t.ae = b->be;
-        it[off[b->nb] + pos[b->nb]++] = t;
-    }
-    for (u = 0; u < n; u++) {
-        ho_item_t *items = it + off[u];
-        int ni = off[u + 1] - off[u], j, maj, bi = -1, bj = -1, ci = 0, lo, hi, sx, ex, ncl = 0, c1, c1ok = 1, cl[2], f;
-        int64 tot[2] = {0, 0}, best = 0, cur = 0;
-        ho_cand_t cn;
-        if (!ni) continue;
-        qsort(items, ni, sizeof(ho_item_t), ho_cmp_item);
-        for (j = 0; j < ni; j++) tot[items[j].want] += items[j].w;
-        maj = tot[1] >= tot[0];
-        for (j = 0; j < ni; j++) {                       /* max-weight subarray of the minority orientation */
-            int64 sc = items[j].want != maj ? items[j].w : -items[j].w;
-            if (cur <= 0) { cur = sc; ci = j; } else cur += sc;
-            if (cur > best) { best = cur; bi = ci; bj = j; }
-        }
-        if (bi < 0 || (double)best < min_gain) continue;
-        lo = CUT(M, M->nseq[u], M->nk[u]); hi = CUT(M, M->nseq[u], M->nk[u] + 1);
-        sx = items[bi].ab; ex = items[bi].ae;
-        for (j = bi; j <= bj; j++) { if (items[j].ab < sx) sx = items[j].ab; if (items[j].ae > ex) ex = items[j].ae; }
-        c1 = lo;
-        if (bi > 0) {
-            int r;
-            if (ho_refine(items, ni, cd, lo, hi, maj, 1 - maj, lo, lo, ex, &r)) { c1 = r; cl[ncl++] = r; } else c1ok = 0;
-        }
-        if (bj < ni - 1) {
-            int r;
-            if (ho_refine(items, ni, cd, lo, hi, 1 - maj, maj, c1ok ? c1 : lo, sx, hi, &r)) cl[ncl++] = r;
-        }
-        for (j = f = 0; j < ncl; j++) if (lo + 100000 < cl[j] && cl[j] < hi - 100000) cl[f++] = cl[j];
-        ncl = f;
-        if (ncl == 2 && cl[1] - cl[0] < 200000) continue;   /* no sliver segments */
-        if (!ncl) continue;
-        cn.best = best; cn.seq = M->nseq[u]; cn.ncl = ncl; cn.cl[0] = cl[0]; cn.cl[1] = ncl > 1 ? cl[1] : 0;
-        if (!have || ho_cand_gt(M, &cn, &bestc)) { bestc = cn; have = 1; }
-    }
-    if (have) {                                  /* greedy parsimony: one event per round */
-        ho_add_cuts(M, bestc.seq, bestc.cl, bestc.ncl);
-        added = bestc.ncl;
-        ho_build(M);
-    }
-    return added;
-}
-
-/* LSQR (Paige & Saunders) - Rows have entries +sw[i] at column ra[i] and -sw[i] at rb[i]. u (m), v (n), w (n) are scratch. */
-static double ho_nrm(const double *v, int n)
-{
-    double s = 0; int i;
-    for (i = 0; i < n; i++) s += v[i] * v[i];
-    return sqrt(s);
-}
-static void ho_lsqr(int m, int n, const int *ra, const int *rb, const double *sw, const double *b, double *x,
-                    double *u, double *v, double *w, double atol, double btol, int iter_lim)
-{
-    double bnorm, beta, alfa, phibar, rhobar, anorm = 0, ddnorm = 0, xxnorm = 0, z = 0, cs2 = -1, sn2 = 0, res2 = 0;
-    double arnorm, ctol = 1e-8, eps = DBL_EPSILON, xnorm;
-    int i, j, itn;
-    for (j = 0; j < n; j++) { x[j] = 0; v[j] = 0; w[j] = 0; }
-    bnorm = ho_nrm(b, m);
-    if (bnorm == 0) return;
-    for (i = 0; i < m; i++) u[i] = b[i] / bnorm;
-    beta = bnorm;
-    for (i = 0; i < m; i++) { v[ra[i]] += sw[i] * u[i]; v[rb[i]] -= sw[i] * u[i]; }
-    alfa = ho_nrm(v, n);
-    if (alfa == 0) return;
-    for (j = 0; j < n; j++) { v[j] /= alfa; w[j] = v[j]; }
-    phibar = beta; rhobar = alfa; arnorm = alfa * beta;
-    if (arnorm == 0) return;
-    for (itn = 1; itn <= iter_lim; itn++) {
-        double rhobar1, cs, sn, rho, theta, phi, tau, t1, t2, wn2, delta, gambar, rhs, zbar, gamma, acond, res1, rnorm;
-        double test1, test2, test3, tt, rtol;
-        int stop;
-        for (i = 0; i < m; i++) u[i] = sw[i] * (v[ra[i]] - v[rb[i]]) - alfa * u[i];
-        beta = ho_nrm(u, m);
-        if (beta > 0) {
-            for (i = 0; i < m; i++) u[i] /= beta;
-            anorm = sqrt(anorm * anorm + alfa * alfa + beta * beta);
-            for (j = 0; j < n; j++) v[j] *= -beta;
-            for (i = 0; i < m; i++) { v[ra[i]] += sw[i] * u[i]; v[rb[i]] -= sw[i] * u[i]; }
-            alfa = ho_nrm(v, n);
-            if (alfa > 0) for (j = 0; j < n; j++) v[j] /= alfa;
-        }
-        rhobar1 = rhobar;
-        /* symmetric Givens rotation (scipy _sym_ortho) */
-        if (beta == 0) { cs = rhobar1 > 0 ? 1 : (rhobar1 < 0 ? -1 : 0); sn = 0; rho = fabs(rhobar1); }
-        else if (rhobar1 == 0) { cs = 0; sn = beta > 0 ? 1 : -1; rho = fabs(beta); }
-        else if (fabs(beta) > fabs(rhobar1)) {
-            double tq = rhobar1 / beta;
-            sn = (beta > 0 ? 1 : -1) / sqrt(1 + tq * tq); cs = sn * tq; rho = beta / sn;
-        } else {
-            double tq = beta / rhobar1;
-            cs = (rhobar1 > 0 ? 1 : -1) / sqrt(1 + tq * tq); sn = cs * tq; rho = rhobar1 / cs;
-        }
-        if (rho == 0) break;
-        theta = sn * alfa; rhobar = -cs * alfa; phi = cs * phibar; phibar = sn * phibar; tau = sn * phi;
-        t1 = phi / rho; t2 = -theta / rho;
-        wn2 = 0;
-        for (j = 0; j < n; j++) wn2 += w[j] * w[j];
-        ddnorm += wn2 / (rho * rho);
-        for (j = 0; j < n; j++) { x[j] += t1 * w[j]; w[j] = v[j] + t2 * w[j]; }
-        delta = sn2 * rho; gambar = -cs2 * rho; rhs = phi - delta * z; zbar = rhs / gambar;
-        xnorm = sqrt(xxnorm + zbar * zbar);
-        gamma = sqrt(gambar * gambar + theta * theta);
-        cs2 = gambar / gamma; sn2 = theta / gamma; z = rhs / gamma; xxnorm += z * z;
-        acond = anorm * sqrt(ddnorm);
-        res1 = phibar * phibar; rnorm = sqrt(res1 + res2);
-        arnorm = alfa * fabs(tau);
-        test1 = rnorm / bnorm; test2 = arnorm / (anorm * rnorm + eps); test3 = 1 / (acond + eps);
-        tt = test1 / (1 + anorm * xnorm / bnorm);
-        rtol = btol + atol * anorm * xnorm / bnorm;
-        stop = itn >= iter_lim || 1 + test3 <= 1 || 1 + test2 <= 1 || 1 + tt <= 1 || test3 <= ctol || test2 <= atol || test1 <= rtol;
-        if (stop) break;
-    }
-}
-
-/* place: robust (IRLS/Cauchy) least squares on segment offsets */
-static double ho_mid_layout(const ho_ctx_t *M, int nd, double p)
-{
-    int c = M->nseq[nd], k = M->nk[nd];
-    double lo = CUT(M, c, k), hi = CUT(M, c, k + 1);
-    if (p < lo) p = lo;
-    if (p > hi) p = hi;
-    return M->ori[nd] ? hi - p : p - lo;
-}
-
-static void ho_place(ho_ctx_t *M)
-{
-    int n = M->nn, nblk = (int)kv_size(M->B), cap = nblk + n + 1, m = 0, i, c, k, it;
-    int *ra, *rb;
-    double *rhs, *sig, *w, *sw, *bb, *r, mn;
-    HO_ENS(M, p_ra, cap); HO_ENS(M, p_rb, cap); HO_ENS(M, p_rhs, cap); HO_ENS(M, p_sig, cap);
-    HO_ENS(M, p_w, cap); HO_ENS(M, p_sw, cap); HO_ENS(M, p_bb, cap); HO_ENS(M, p_r, cap);
-    HO_ENS(M, l_v, n + 1); HO_ENS(M, l_w, n + 1);
-    ra = M->p_ra; rb = M->p_rb; rhs = M->p_rhs; sig = M->p_sig; w = M->p_w; sw = M->p_sw; bb = M->p_bb; r = M->p_r;
-    for (i = 0; i < nblk; i++) {
-        const ho_blk_t *b = &kv_A(M->B, i);
-        if (b->na == b->nb || (M->ori[b->na] ^ M->ori[b->nb]) != b->rel) continue;
-        ra[m] = b->na; rb[m] = b->nb;
-        rhs[m] = ho_mid_layout(M, b->nb, b->mb) - ho_mid_layout(M, b->na, b->ma);
-        sig[m] = MAX(50000., 0.05 * (double)b->w);
-        m++;
-    }
-    for (c = 0; c < M->ns; c++)                      /* weak adjacency of consecutive same-orientation segments */
-        for (k = 0; k < NCUT(M, c) - 2; k++) {
-            int a = M->noff[c] + k, b = a + 1;
-            double La = CUT(M, c, k + 1) - CUT(M, c, k), Lb = CUT(M, c, k + 2) - CUT(M, c, k + 1);
-            if (M->ori[a] != M->ori[b]) continue;
-            if (M->ori[a] == 0) { ra[m] = a; rb[m] = b; rhs[m] = -La; }
-            else                { ra[m] = b; rb[m] = a; rhs[m] = -Lb; }
-            sig[m] = 1e6; m++;
-        }
-    for (i = 0; i < m; i++) w[i] = 1.;
-    MYBZERO(M->x, n);
-    if (m > 0) {
-        for (it = 0; it < 15; it++) {
-            for (i = 0; i < m; i++) { sw[i] = sqrt(w[i]) / sig[i]; bb[i] = rhs[i] * sw[i]; }
-            ho_lsqr(m, n, ra, rb, sw, bb, M->x, r, M->l_v, M->l_w, 1e-12, 1e-12, 50000);   /* r used as scratch u */
-            for (i = 0; i < m; i++) {
-                double z;
-                r[i] = M->x[ra[i]] - M->x[rb[i]] - rhs[i];
-                z = r[i] / sig[i] / 2.5; z = 1 + z * z; w[i] = 1. / (z * z);
-            }
-        }
-    }
-    mn = n ? M->x[0] : 0;
-    for (i = 1; i < n; i++) if (M->x[i] < mn) mn = M->x[i];
-    for (i = 0; i < n; i++) M->x[i] -= mn;
-}
-
-/* merge neighbouring collinear segments back together */
-static void ho_merge_collinear(ho_ctx_t *M)
-{
-    int it;
-    for (it = 0; it < 6; it++) {
-        int c, k, i;
-        M->rc.n = M->rcut.n = 0;
-        for (c = 0; c < M->ns; c++)
-            for (k = 0; k < NCUT(M, c) - 2; k++) {
-                int a = M->noff[c] + k, b = a + 1;
-                int o1 = M->ori[a], o2 = M->ori[b];
-                double len1 = CUT(M, c, k + 1) - CUT(M, c, k), len2 = CUT(M, c, k + 2) - CUT(M, c, k + 1);
-                double j1, j2;
-                if (o1 != o2) continue;
-                j1 = o1 ? M->x[a] : M->x[a] + len1;
-                j2 = o2 ? M->x[b] + len2 : M->x[b];
-                if (fabs(j2 - j1) < 3e5) { kv_push(int, M->rc, c); kv_push(int, M->rcut, CUT(M, c, k + 1)); }
-            }
-        if (!kv_size(M->rc)) break;
-        for (i = 0; i < (int)kv_size(M->rc); i++) {
-            int c2 = kv_A(M->rc, i), n = NCUT(M, c2), t;
-            for (t = 0; t < n; t++)
-                if (CUT(M, c2, t) == kv_A(M->rcut, i)) {
-                    memmove(M->cuts[c2].a + t, M->cuts[c2].a + t + 1, (n - t - 1) * sizeof(int));
-                    M->cuts[c2].n--; break;
-                }
-        }
-        ho_build(M); ho_orient(M); ho_place(M);
-    }
-}
-
-/* haplotype-level analysis */
-static int ho_cmp_pair(const void *p, const void *q)
-{
-    const ho_pair_t *x = p, *y = q;
-    if (x->d != y->d) return x->d < y->d ? -1 : 1;
-    if (x->i != y->i) return x->i < y->i ? -1 : 1;
-    return (x->j > y->j) - (x->j < y->j);
-}
-
-static void ho_fit(int L, const ho_piece_t *p, int np, int *oc, double *x0)
-{
-    double w[2] = {0, 0}, sx = 0, sw = 0;
-    int i, o;
-    for (i = 0; i < np; i++) w[p[i].o] += p[i].hi - p[i].lo;
-    o = w[1] > w[0];
-    for (i = 0; i < np; i++) {
-        double x, ww;
-        if (p[i].o != o) continue;
-        x = o == 0 ? p[i].b - p[i].lo : p[i].b - (L - p[i].hi);
-        ww = p[i].hi - p[i].lo;
-        sx += x * ww; sw += ww;
-    }
-    *oc = o; *x0 = sx / sw;
-}
-
-#ifdef DEBUG_HAP_ORDER
-#ifndef HO_DEBUG_PREFIX
-#define HO_DEBUG_PREFIX "hap_order"
-#endif
-static int ho_cmp_iv(const void *p, const void *q)
-{
-    const ho_iv_t *x = p, *y = q;
-    return (x->s > y->s) - (x->s < y->s);
-}
-static int ho_cmp_ord(const void *p, const void *q)
-{
-    const ho_ord_t *x = p, *y = q;
-    if (x->hap != y->hap) return x->hap < y->hap ? -1 : 1;
-    if (x->start != y->start) return x->start < y->start ? -1 : 1;
-    return (x->idx > y->idx) - (x->idx < y->idx);
-}
-static void ho_debug_dump(ho_ctx_t *M, int bidx, const ho_piece_t *P, const ho_piece_t *NP, double mn)
-{
-    int ns = M->ns, c, t, e, i, last = -1, cnt = 0;
-    const int *slen = M->slen, *hap = M->hap;
-    char fn[512]; FILE *fp;
-    HO_ENS(M, d_ord, ns + 1); HO_ENS(M, d_cont, ns + 1); HO_ENS(M, d_iv, M->nn + 1);
-    for (c = 0; c < ns; c++) {                       /* containment inside a longer sequence of the same haplotype */
-        double rs = M->bpos[c], re = M->epos[c]; M->d_cont[c] = -1;
-        for (t = 0; t < ns && M->d_cont[c] < 0; t++) {
-            int ni = 0, q; double tot = 0, cs, ce;
-            if (t == c || hap[t] != hap[c] || slen[t] <= slen[c]) continue;
-            for (q = 0; q < NCUT(M, t) - 1; q++) {
-                const ho_piece_t *p = NP + M->noff[t] + q;
-                double s_ = MAX(p->b - mn, rs), e_ = MIN(p->e - mn, re);
-                if (e_ > s_) { M->d_iv[ni].s = s_; M->d_iv[ni].e = e_; ni++; }
-            }
-            if (ni) {
-                qsort(M->d_iv, ni, sizeof(ho_iv_t), ho_cmp_iv);
-                cs = M->d_iv[0].s; ce = M->d_iv[0].e;
-                for (q = 1; q < ni; q++) {
-                    if (M->d_iv[q].s > ce) { tot += ce - cs; cs = M->d_iv[q].s; ce = M->d_iv[q].e; }
-                    else if (M->d_iv[q].e > ce) ce = M->d_iv[q].e;
-                }
-                tot += ce - cs;
-            }
-            if (tot > 0.5 * slen[c]) M->d_cont[c] = t;
-        }
-        M->d_ord[c].idx = c; M->d_ord[c].hap = hap[c]; M->d_ord[c].start = M->bpos[c];
-    }
-    qsort(M->d_ord, ns, sizeof(ho_ord_t), ho_cmp_ord);
-    snprintf(fn, sizeof(fn), "%s_%d_native_order.tsv", HO_DEBUG_PREFIX, bidx);
-    fp = fopen(fn, "w");
-    if (fp) {
-        fprintf(fp, "#hap\torder\tsequence\tnative_strand\tnative_start\tnative_end\tlength\tframe_strand\tframe_start\tflags\tnotes\n");
-        for (i = 0; i < ns; i++) {
-            int cs_ = M->d_ord[i].idx, np = NCUT(M, cs_) - 1, first = 1;
-            if (M->d_ord[i].hap != last) { last = M->d_ord[i].hap; cnt = 0; }
-            cnt++;
-            fprintf(fp, "%d\t%d\t%s\t%c\t%lld\t%lld\t%d\t%c\t%lld\t", hap[cs_], cnt, HO_NAME(M, cs_), "+-"[M->noc[cs_]],
-                    (long long)M->bpos[cs_], (long long)M->epos[cs_], slen[cs_], "+-"[M->foc[cs_]], (long long)rint(M->fx0[cs_] - mn));
-            for (t = 0; t < np; t++) {
-                const ho_piece_t *p = NP + M->noff[cs_] + t;
-                if (p->ev >= 0) {
-                    int dup = 0, t2;
-                    for (t2 = 0; t2 < t; t2++) if (NP[M->noff[cs_] + t2].ev == p->ev) dup = 1;
-                    if (!dup) { fprintf(fp, "%smoved_by:H%d_INV%d", first ? "" : ",", hap[cs_], kv_A(M->EV, p->ev).idn); first = 0; }
-                }
-            }
-            for (e = 0; e < (int)kv_size(M->EV); e++)
-                if (kv_A(M->EV, e).br[0] == cs_ || kv_A(M->EV, e).br[1] == cs_) {
-                    fprintf(fp, "%sbridges:H%d_INV%d", first ? "" : ",", kv_A(M->EV, e).hap, kv_A(M->EV, e).idn); first = 0;
-                }
-            if (M->d_cont[cs_] >= 0) { fprintf(fp, "%sinside_same_hap:%.12s", first ? "" : ",", HO_NAME(M, M->d_cont[cs_])); first = 0; }
-            if (first) fprintf(fp, ".");
-            fprintf(fp, "\t");
-            if (np > 1) {
-                for (t = 0; t < np; t++)
-                    fprintf(fp, "%s%d-%d:%c", t ? ";" : "", P[M->noff[cs_] + t].lo, P[M->noff[cs_] + t].hi, "+-"[P[M->noff[cs_] + t].o]);
-                fprintf(fp, " (frame strand of pieces)");
-            } else fprintf(fp, ".");
-            fprintf(fp, "\n");
-        }
-        fclose(fp);
-    }
-    snprintf(fn, sizeof(fn), "%s_%d_events.tsv", HO_DEBUG_PREFIX, bidx);
-    fp = fopen(fn, "w");
-    if (fp) {
-        fprintf(fp, "#event\thap\ttype\tframe_beg\tframe_end\tlength\tbridging_sequences\thaps_crossing_beg\thaps_crossing_end\n");
-        for (e = 0; e < (int)kv_size(M->EV); e++) {
-            const ho_event_t *ev = &kv_A(M->EV, e);
-            int side;
-            fprintf(fp, "H%d_INV%d\t%d\tinversion\t%d\t%d\t%d\t", ev->hap, ev->idn, ev->hap, (int)(ev->a - mn), (int)(ev->b - mn), (int)(ev->b - ev->a));
-            for (t = 0; t < ev->nbr; t++) fprintf(fp, "%s%s", t ? "," : "", HO_NAME(M, ev->br[t]));
-            for (side = 0; side < 2; side++) {
-                uint8 hs[256]; int cc2, q, first = 1; double bp = side ? ev->b : ev->a;
-                memset(hs, 0, sizeof(hs));
-                for (cc2 = 0; cc2 < ns; cc2++) {
-                    if (hap[cc2] == ev->hap) continue;
-                    for (q = 0; q < NCUT(M, cc2) - 1; q++) {
-                        const ho_piece_t *p = P + M->noff[cc2] + q;
-                        if (p->b < bp - 150000 && p->e > bp + 150000) hs[hap[cc2] & 255] = 1;
-                    }
-                }
-                fprintf(fp, "\t");
-                for (q = 0; q < 256; q++) if (hs[q]) { fprintf(fp, "%s%d", first ? "" : ",", q); first = 0; }
-            }
-            fprintf(fp, "\n");
-        }
-        fclose(fp);
-    }
-}
-#endif
-
-/* strand switches inside alignment chains
- *
- * An alignment chain (an O record followed by its F fragments) whose consecutive fragments change strand is direct evidence of an
- * inversion breakpoint in BOTH sequences.  The greedy split below only sees "weight on the wrong side" per sequence and has to guess
- * which of the two sequences carries the inversion.  With a bridging sequence that guess can go to the wrong one (a terminal flip of
- * a sequence that spans the breakpoint, instead of a closed inversion inside another one); the layout then folds a whole block of
- * sequences over its neighbours.  Cutting both sequences at the switch up front lets ho_orient() decide per piece, and
- * ho_merge_collinear() removes every cut that was not needed.
- * apply = 0: only count the usable switches. 
- * */
 static int ho_cmp_fr(const void *p, const void *q)
 {
-    const ovl_frag_t *x = p, *y = q;
-    return (x->abpos > y->abpos) - (x->abpos < y->abpos);
+    const ho_fr_t *a = p, *b = q;
+    return (a->a0 > b->a0) - (a->a0 < b->a0);
 }
 
-static int ho_frag_switches(ho_ctx_t *M, int apply)
+/* heaviest collinear chain of fr[0..n) (sorted by a0); rel: b decreasing along a.  Appends its fragments to S->F; returns weight */
+static double ho_sync_chain(ho_sync_t *S, ho_fr_t *fr, int n, int rel, double *f, int *par, double *sl)
 {
-    int ne = (int) kv_size(M->E), t, f, found = 0;
-    for (t = 0; t < ne; t++) {
-        const ho_e_t *e = &kv_A(M->E, t);
-        int nf = e->o->nfrag;
-        ovl_frag_t *fr;
-        if (nf < 2) continue;
-        MYMALLOC(fr, (size_t) nf);
-        memcpy(fr, e->o->frags, nf * sizeof(ovl_frag_t));
-        qsort(fr, nf, sizeof(ovl_frag_t), ho_cmp_fr);
-        for (f = 0; f + 1 < nf; f++) {
-            const ovl_frag_t *p = &fr[f], *q = &fr[f + 1];
-            int ca, cb, x[2], y[2], i, j, bd = 1 << 30;
-            if (p->rev == q->rev) continue;
-            if (p->aepos - p->abpos < HO_MINBLK || q->aepos - q->abpos < HO_MINBLK) continue;
-            ca = MIN(p->aepos, q->abpos);                       /* a side: end of the earlier fragment */
-            x[0] = p->bbpos; x[1] = p->bepos; y[0] = q->bbpos; y[1] = q->bepos;
-            cb = x[0];
-            for (i = 0; i < 2; i++)                              /* b side: closest pair of fragment ends, lower coordinate */
-                for (j = 0; j < 2; j++) {
-                    int d = abs(x[i] - y[j]);
-                    if (d < bd) { bd = d; cb = MIN(x[i], y[j]); }
-                }
-            if (ca > HO_MINBLK && ca < M->slen[e->a] - HO_MINBLK) { found++; if (apply) ho_add_cuts(M, e->a, &ca, 1); }
-            if (cb > HO_MINBLK && cb < M->slen[e->b] - HO_MINBLK) { found++; if (apply) ho_add_cuts(M, e->b, &cb, 1); }
+    int i, j, e = -1;
+    double a0 = 1e300, a1 = -1e300, b0 = 1e300, b1 = -1e300;
+    for (i = 0; i < n; i++) {
+        f[i] = fr[i].w; par[i] = -1;
+        for (j = 0; j < i; j++) {
+            double ta = HO_INV_OVL * MIN(fr[i].a1 - fr[i].a0, fr[j].a1 - fr[j].a0), tb = HO_INV_OVL * MIN(fr[i].b1 - fr[i].b0, fr[j].b1 - fr[j].b0);
+            if (fr[j].a1 - ta > fr[i].a0) continue;
+            if (rel ? fr[i].b1 - tb > fr[j].b0 : fr[j].b1 - tb > fr[i].b0) continue;
+            if (f[j] + fr[i].w > f[i]) { f[i] = f[j] + fr[i].w; par[i] = j; }
         }
-        free(fr);
+        if (e < 0 || f[i] > f[e]) e = i;
     }
-    if (apply && found) ho_build(M);
-    return found;
+    if (e < 0) return 0;
+    for (i = e; i >= 0; i = par[i]) {
+        ho_rf_t r = {.5 * (fr[i].a0 + fr[i].a1), .5 * (fr[i].b0 + fr[i].b1), fr[i].w};
+        kv_push(ho_rf_t, S->F, r);
+        a0 = MIN(a0, fr[i].a0); a1 = MAX(a1, fr[i].a1); b0 = MIN(b0, fr[i].b0); b1 = MAX(b1, fr[i].b1);
+    }
+    *sl = .5 * ((a1 - a0) + (b1 - b0));
+    return f[e];
 }
 
-/* overlap (bp) between sequences of the same haplotype in the finished layout; a haplotype cannot hold two of its own sequences on
- * the same stretch, so a large value flags a physically impossible (folded) layout */
-static double ho_collision(const ho_ctx_t *M)
+static void ho_sync_readings(const ho_ctx_t *M, ho_sync_t *S)
 {
-    int a, b;
+    int k, f, rel, ns = M->ns, cap = 16, n[2], *par;
+    ho_fr_t *fr[2];
+    double *fw;
+    MYMALLOC(fr[0], cap); MYMALLOC(fr[1], cap); MYMALLOC(fw, cap); MYMALLOC(par, cap);
+    if (!fr[0] || !fr[1] || !fw || !par) mem_alloc_error("hap order array");
+    for (k = 0; k < (int) kv_size(M->E); k++) {
+        const ho_e_t *e = &kv_A(M->E, k);
+        const ovl_t *o = e->o;
+        int nf = o->nfrag ? o->nfrag : 1;
+        if (ho_same_hap(M, e->a, e->b, M->ploidy)) continue;
+        if (nf > cap) {
+            cap = nf; MYREALLOC(fr[0], cap); MYREALLOC(fr[1], cap); MYREALLOC(fw, cap); MYREALLOC(par, cap);
+            if (!fr[0] || !fr[1] || !fw || !par) mem_alloc_error("hap order array");
+        }
+        n[0] = n[1] = 0;
+        for (f = 0; f < nf; f++) {
+            int ab = o->nfrag ? o->frags[f].abpos : o->abpos, ae = o->nfrag ? o->frags[f].aepos : o->aepos;
+            int bb = o->nfrag ? o->frags[f].bbpos : o->bbpos, be = o->nfrag ? o->frags[f].bepos : o->bepos;
+            int r = o->nfrag ? (o->frags[f].rev != 0) : e->raw;
+            double w = MIN(ae - ab, be - bb);
+            if (w < HO_SYNC_MINLEN) continue;
+            fr[r][n[r]++] = (ho_fr_t){ab, ae, bb, be, w};
+        }
+        for (rel = 0; rel < 2; rel++) {
+            ho_rd_t d;
+            if (n[rel] == 0) continue;
+            qsort(fr[rel], n[rel], sizeof(ho_fr_t), ho_cmp_fr);
+            d.a = e->a; d.b = e->b; d.rel = rel; d.f0 = (int) S->F.n;
+            d.w = ho_sync_chain(S, fr[rel], n[rel], rel, fw, par, &d.sl);
+            d.nf = (int) S->F.n - d.f0;
+            kv_push(ho_rd_t, S->R, d);
+        }
+    }
+    MYMALLOC(S->roff, ns + 1); MYMALLOC(S->radj, 2 * S->R.n + 1);
+    if (!S->roff || !S->radj) mem_alloc_error("hap order array");
+    MYBZERO(S->roff, ns + 1);
+    for (k = 0; k < (int) S->R.n; k++) { S->roff[S->R.a[k].a + 1]++; S->roff[S->R.a[k].b + 1]++; }
+    for (k = 0; k < ns; k++) S->roff[k + 1] += S->roff[k];
+    {
+        int *fill;
+        MYMALLOC(fill, ns + 1);
+        if (!fill) mem_alloc_error("hap order array");
+        memcpy(fill, S->roff, (ns + 1) * sizeof(int));
+        for (k = 0; k < (int) S->R.n; k++) { S->radj[fill[S->R.a[k].a]++] = k; S->radj[fill[S->R.a[k].b]++] = k; }
+        free(fill);
+    }
+    free(fr[0]); free(fr[1]); free(fw); free(par);
+}
+
+static double ho_wmedian(ho_est_t *v, int n)
+{
+    double tot = 0, acc = 0;
+    int i;
+    qsort(v, n, sizeof(ho_est_t), ho_cmp_est);
+    for (i = 0; i < n; i++) tot += v[i].w;
+    for (i = 0; i < n; i++) { acc += v[i].w; if (acc >= tot / 2) break; }
+    return v[i < n ? i : n - 1].v;
+}
+
+/* layout coordinate of position p of sequence i */
+static double ho_lc(const ho_ctx_t *M, int i, double p) { return M->pos[i] + (M->rev[i] ? M->slen[i] - p : p); }
+
+/* (strand, offset) of sequence j proposed by reading k from its other sequence i */
+static double ho_sync_prop(const ho_ctx_t *M, ho_sync_t *S, int k, int j, int *s)
+{
+    const ho_rd_t *d = &S->R.a[k];
+    int i = d->a == j ? d->b : d->a, f;
+    S->T.n = 0;
+    *s = M->rev[i] ^ d->rel;
+    for (f = d->f0; f < d->f0 + d->nf; f++) {
+        const ho_rf_t *r = &S->F.a[f];
+        double pi = d->a == j ? r->pb : r->pa, pj = d->a == j ? r->pa : r->pb;
+        ho_est_t x = {ho_lc(M, i, pi) - (*s ? M->slen[j] - pj : pj), r->w};
+        kv_push(ho_est_t, S->T, x);
+    }
+    return ho_wmedian(S->T.a, (int) S->T.n);
+}
+
+/* same-haplotype overlap (bp) between the sequences of cluster A and those of cluster B moved by (m, t): per haplotype, every
+ * sequence of B against the sequences of A that can reach it (A's list sorted by position; a sequence starting more than A's longest
+ * one before it cannot) */
+static double ho_sync_overlap(const ho_ctx_t *M, const ho_sync_t *S, int A, int B, int m, double t)
+{
     double tot = 0;
-    for (a = 0; a < M->ns; a++) {
-        if (M->hap[a] <= 0) continue;
-        for (b = a + 1; b < M->ns; b++) {
-            double ov;
-            if (M->hap[b] != M->hap[a]) continue;
-            ov = (double) MIN(M->epos[a], M->epos[b]) - (double) MAX(M->bpos[a], M->bpos[b]) - 50000.;
-            if (ov > 0) tot += ov;
+    int h, i, k, pl = M->ploidy + 1;
+    for (h = 1; h < pl; h++) {
+        const int *la = S->iv[A * pl + h].a, *lb = S->iv[B * pl + h].a;
+        int na = (int) S->iv[A * pl + h].n, nb = (int) S->iv[B * pl + h].n;
+        for (i = 0; i < nb && na > 0; i++) {
+            int b = lb[i], lo = 0, hi = na;
+            double b0 = m ? t - M->pos[b] - M->slen[b] : M->pos[b] + t, b1 = b0 + M->slen[b], from = b0 - S->ivmax[A * pl + h];
+            while (lo < hi) { int mid = (lo + hi) >> 1; if (M->pos[la[mid]] <= from) lo = mid + 1; else hi = mid; }
+            for (k = lo; k < na && M->pos[la[k]] < b1; k++) {
+                int a = la[k];
+                tot += MAX(0, MIN(b1, M->pos[a] + M->slen[a]) - MAX(b0, M->pos[a]));
+            }
         }
     }
     return tot;
 }
 
-/* order one group whose blocks are already in M->B; fills M->rev / bpos / epos */
-static void ho_run_group_once(ho_ctx_t *M, int bidx, int precut)
+/* can the moved sequences (cluster B moved rigidly by mirror m, or, if B < 0, the single sequence j at offset t) go from shift t1 to
+ * t2 without any of them crossing a sequence of its haplotype in cluster A by more than the junction allowance?  Crossing: the part
+ * of A's sequence inside the range swept by the moved one, less what it covers at both shifts.  ap: positions A's lists are sorted
+ * by.  Monotone: the farther apart t1 and t2, the more is crossed.  A < 0: no test. */
+static int ho_sync_free(const ho_ctx_t *M, const ho_sync_t *S, int A, const double *ap, int B, int j, int m, double t1, double t2)
 {
-    ho_piece_t *P, *NP;
-    int ns = M->ns, c, k, i, j, round, nj, nc;
-    double mn = 0;
-
-    (void)bidx;
-    ho_model_reset(M);
-    if (precut) ho_frag_switches(M, 1);
-    ho_orient(M);
-    for (round = 0; round < HO_MAX_SPLIT_ROUNDS; round++) {
-        if (!ho_split(M, HO_MIN_SPLIT_GAIN)) break;
-        ho_orient(M);
-    }
-    ho_place(M);
-    ho_merge_collinear(M);
-
-    /* pieces in the shared frame */
-    HO_ENS(M, P, M->nn + 1); HO_ENS(M, NP, M->nn + 1);
-    P = M->P; NP = M->NP;
-    for (i = 0; i < M->nn; i++) {
-        int cc_ = M->nseq[i], kk = M->nk[i];
-        P[i].lo = CUT(M, cc_, kk); P[i].hi = CUT(M, cc_, kk + 1); P[i].o = M->ori[i];
-        P[i].b = M->x[i]; P[i].e = M->x[i] + P[i].hi - P[i].lo; P[i].ev = -1;
-    }
-
-    /* 1. inversion events from complementary strand-switch junctions */
-    M->J.n = M->EV.n = M->cand.n = 0;
-    for (c = 0; c < ns; c++)
-        for (k = 0; k < NCUT(M, c) - 2; k++) {
-            const ho_piece_t *p = P + M->noff[c] + k, *q = p + 1;
-            double u, v, lo_, hi_; int su, sv, slo, shi; ho_junc_t jn;
-            if (p->o == q->o) continue;
-            u = p->o ? p->b : p->e; su = p->o;
-            v = q->o ? q->e : q->b; sv = q->o;
-            if (u > v) { lo_ = v; slo = 1 - sv; hi_ = u; shi = 1 - su; }
-            else       { lo_ = u; slo = su; hi_ = v; shi = sv; }
-            jn.c = c; jn.hap = M->hap[c]; jn.a = lo_; jn.b = hi_; jn.kind = (slo == 0 && shi == 1) ? 0 : 1;
-            kv_push(ho_junc_t, M->J, jn);
+    int pl = M->ploidy + 1, b = B >= 0 ? S->head[B] : j;
+    if (A < 0) return 1;
+    for (; b >= 0; b = B >= 0 ? S->next[b] : -1) {
+        int h = M->hap[b], lo, hi, k, na;
+        const int *la;
+        double L = M->slen[b], u1, u2, x0, x1, y0, y1, from;
+        if (h < 1 || h >= pl) continue;
+        u1 = B < 0 ? t1 : m ? t1 - M->pos[b] - L : M->pos[b] + t1;
+        u2 = B < 0 ? t2 : m ? t2 - M->pos[b] - L : M->pos[b] + t2;
+        x0 = MIN(u1, u2); x1 = MAX(u1, u2) + L;                     /* swept */
+        y0 = MAX(u1, u2); y1 = MIN(u1, u2) + L;                     /* covered at both shifts */
+        la = S->iv[A * pl + h].a; na = (int) S->iv[A * pl + h].n; from = x0 - S->ivmax[A * pl + h];
+        lo = 0; hi = na;
+        while (lo < hi) { int mid = (lo + hi) >> 1; if (ap[la[mid]] <= from) lo = mid + 1; else hi = mid; }
+        for (k = lo; k < na && ap[la[k]] < x1; k++) {
+            int a = la[k];
+            double a0 = ap[a], a1 = a0 + M->slen[a];
+            double c = MAX(0, MIN(x1, a1) - MAX(x0, a0)) - (y1 > y0 ? MAX(0, MIN(y1, a1) - MAX(y0, a0)) : 0);
+            if (a != j && c > ho_mg(M->slen[a])) return 0;
         }
-    nj = (int)kv_size(M->J);
-    for (i = 0; i < nj; i++)
-        for (j = 0; j < nj; j++) {
-            const ho_junc_t *x = &kv_A(M->J, i), *y = &kv_A(M->J, j);
-            if (x->kind == 0 && y->kind == 1 && x->hap == y->hap && fabs(x->a - y->a) < HO_TOL && fabs(x->b - y->b) < HO_TOL) {
-                ho_pair_t pr; pr.d = fabs(x->a - y->a) + fabs(x->b - y->b); pr.i = i; pr.j = j;
-                kv_push(ho_pair_t, M->cand, pr);
-            }
-        }
-    nc = (int)kv_size(M->cand);
-    qsort(M->cand.a, nc, sizeof(ho_pair_t), ho_cmp_pair);
-    HO_ENS(M, used, nj + 1); MYBZERO(M->used, nj + 1);
-    for (i = 0; i < nc; i++) {
-        const ho_junc_t *x, *y; ho_event_t ev; int t, cnt = 0;
-        if (M->used[kv_A(M->cand, i).i] || M->used[kv_A(M->cand, i).j]) continue;
-        M->used[kv_A(M->cand, i).i] = M->used[kv_A(M->cand, i).j] = 1;
-        x = &kv_A(M->J, kv_A(M->cand, i).i); y = &kv_A(M->J, kv_A(M->cand, i).j);
-        for (t = 0; t < (int)kv_size(M->EV); t++) if (kv_A(M->EV, t).hap == x->hap) cnt++;
-        ev.hap = x->hap; ev.idn = cnt + 1; ev.a = (x->a + y->a) / 2; ev.b = (x->b + y->b) / 2;
-        if (x->c == y->c) { ev.nbr = 1; ev.br[0] = x->c; ev.br[1] = -1; }
-        else {
-            ev.nbr = 2;
-            if (strcmp(HO_NAME(M, x->c), HO_NAME(M, y->c)) <= 0) { ev.br[0] = x->c; ev.br[1] = y->c; }
-            else { ev.br[0] = y->c; ev.br[1] = x->c; }
-        }
-        kv_push(ho_event_t, M->EV, ev);
     }
-
-    /* 2. native pieces: move the piece(s) inside an inversion back to native orientation */
-    for (c = 0; c < ns; c++)
-        for (k = 0; k < NCUT(M, c) - 1; k++) {
-            int id = M->noff[c] + k, e;
-            double mid = (P[id].b + P[id].e) / 2;
-            NP[id] = P[id];
-            for (e = 0; e < (int)kv_size(M->EV); e++) {
-                const ho_event_t *ev = &kv_A(M->EV, e);
-                if (ev->hap == M->hap[c] && ev->a < mid && mid < ev->b) {
-                    NP[id].b = ev->a + ev->b - P[id].e; NP[id].e = ev->a + ev->b - P[id].b;
-                    NP[id].o = 1 - P[id].o; NP[id].ev = e;
-                }
-            }
-        }
-
-    /* 3. per-sequence strand / offset (frame view and native view) */
-    for (c = 0; c < ns; c++) {
-        int np = NCUT(M, c) - 1;
-        ho_fit(M->slen[c], P + M->noff[c], np, &M->foc[c], &M->fx0[c]);
-        ho_fit(M->slen[c], NP + M->noff[c], np, &M->noc[c], &M->nx0[c]);
-        if (c == 0 || M->fx0[c] < mn) mn = M->fx0[c];
-    }
-    for (c = 0; c < ns; c++) {
-        M->rev[c] = (uint8)M->noc[c];
-        M->bpos[c] = (int64)rint(M->nx0[c] - mn);
-        M->epos[c] = M->bpos[c] + M->slen[c];
-    }
-#ifdef DEBUG_HAP_ORDER
-    ho_debug_dump(M, bidx, P, NP, mn);
-#endif
+    return 1;
 }
 
-/* Normal run first.  Only if that layout has substantial same-haplotype overlap AND the alignment chains contain strand switches,
- * run again with the sequences pre-cut at the switches and keep the second layout if it removes >= 20% of the overlap.
- * Groups without switches, or with a clean first layout, come out exactly as before. */
-#define HO_COLL_MIN   300000.
-#define HO_COLL_GAIN  0.8
-static void ho_run_group(ho_ctx_t *M, int bidx)
+static int ho_cmp_pr(const void *p, const void *q)
 {
-    double c0;
-    ho_run_group_once(M, bidx, 0);
-    if (!ho_frag_switches(M, 0)) return;
-    c0 = ho_collision(M);
-    if (c0 <= HO_COLL_MIN) return;
-    ho_run_group_once(M, bidx, 1);
-    if (ho_collision(M) >= c0 * HO_COLL_GAIN) ho_run_group_once(M, bidx, 0);   /* no real improvement: restore the original */
+    const ho_pr_t *a = p, *b = q;
+    if (a->m != b->m) return a->m - b->m;
+    return (a->t > b->t) - (a->t < b->t);
+}
+
+/* the group of proposal q among the proposals S->P[b0 .. b1) of its mirror, sorted by shift: those that can be moved to its shift
+ * without crossing (ho_sync_free; contiguous around q, found by bisection) and whose alignment still lines up there (shift difference
+ * within their slack).  Returns its weight; *t = its weighted median shift. */
+static double ho_sync_group(const ho_ctx_t *M, ho_sync_t *S, int A, const double *ap, int B, int j, int b0, int b1, int q, double *t)
+{
+    const ho_pr_t *P = S->P.a;
+    int lo, hi, l, r, i;
+    double w = 0;
+    for (lo = b0, hi = q; lo < hi; ) { int mid = (lo + hi) >> 1; if (ho_sync_free(M, S, A, ap, B, j, P[q].m, P[mid].t, P[q].t)) hi = mid; else lo = mid + 1; }
+    l = lo;
+    for (lo = q, hi = b1 - 1; lo < hi; ) { int mid = (lo + hi + 1) >> 1; if (ho_sync_free(M, S, A, ap, B, j, P[q].m, P[q].t, P[mid].t)) lo = mid; else hi = mid - 1; }
+    r = lo;
+    S->T.n = 0;
+    for (i = l; i <= r; i++)
+        if (fabs(P[i].t - P[q].t) <= P[i].sl) { ho_est_t x = {P[i].t, P[i].w}; kv_push(ho_est_t, S->T, x); w += P[i].w; }
+    *t = ho_wmedian(S->T.a, (int) S->T.n);
+    return w;
+}
+
+/* the heaviest group over all proposals in S->P (sorted here); *m, *t its mirror and shift; returns its weight (-1: none).  With
+ * pen > 0 (cluster merging), groups are scored by weight - pen x the same-haplotype overlap (ho_sync_overlap) and *sc is the score. */
+static double ho_sync_best(const ho_ctx_t *M, ho_sync_t *S, int A, const double *ap, int B, int j, double pen, int *m, double *t, double *sc)
+{
+    int q, b0 = 0, n = (int) S->P.n;
+    double bw = -1, bs = 0;
+    qsort(S->P.a, n, sizeof(ho_pr_t), ho_cmp_pr);
+    for (q = 0; q < n; q++) {
+        double tq, w, s;
+        if (q > 0 && S->P.a[q].m != S->P.a[q - 1].m) b0 = q;
+        {
+            int b1 = q + 1;
+            while (b1 < n && S->P.a[b1].m == S->P.a[q].m) b1++;
+            w = ho_sync_group(M, S, A, ap, B, j, b0, b1, q, &tq);
+        }
+        s = w - (pen > 0 ? pen * ho_sync_overlap(M, S, A, B, S->P.a[q].m, tq) : 0);
+        if (bw < 0 || s > bs) { bw = w; bs = s; *m = S->P.a[q].m; *t = tq; }
+    }
+    if (sc) *sc = bs;
+    return bw;
+}
+
+/* best map (m, t) of cluster B into the frame of cluster A; score = group weight - pen x same-haplotype overlap; returns 0 if no reading
+ * joins them */
+static int ho_sync_choose(const ho_ctx_t *M, ho_sync_t *S, int A, int B, double pen, ho_mg_t *g)
+{
+    int b, i, s;
+    S->P.n = 0;
+    for (b = S->head[B]; b >= 0; b = S->next[b])
+        for (i = S->roff[b]; i < S->roff[b + 1]; i++) {
+            int k = S->radj[i], o = S->R.a[k].a == b ? S->R.a[k].b : S->R.a[k].a;
+            double c;
+            ho_pr_t p;
+            if (S->cl[o] != A) continue;
+            c = ho_sync_prop(M, S, k, b, &s);
+            p.m = s ^ M->rev[b]; p.t = p.m ? c + M->pos[b] + M->slen[b] : c - M->pos[b]; p.w = S->R.a[k].w; p.sl = S->R.a[k].sl;
+            kv_push(ho_pr_t, S->P, p);
+        }
+    if (S->P.n == 0) return 0;
+    {
+        int m = 0;
+        double t = 0, sc = 0;
+        ho_sync_best(M, S, A, M->pos, B, -1, pen, &m, &t, &sc);
+        *g = (ho_mg_t){sc, A, B, S->ver[A], S->ver[B], m, t};
+    }
+    return 1;
+}
+
+/* binary max-heap of merge candidates */
+static void ho_heap_push(ho_sync_t *S, const ho_mg_t *g)
+{
+    size_t i = S->H.n;
+    kv_push(ho_mg_t, S->H, *g);
+    while (i > 0 && S->H.a[(i - 1) / 2].sc < S->H.a[i].sc) { ho_mg_t t = S->H.a[i]; S->H.a[i] = S->H.a[(i - 1) / 2]; S->H.a[(i - 1) / 2] = t; i = (i - 1) / 2; }
+}
+static ho_mg_t ho_heap_pop(ho_sync_t *S)
+{
+    ho_mg_t top = S->H.a[0];
+    size_t i = 0, n = --S->H.n;
+    S->H.a[0] = S->H.a[n];
+    for (;;) {
+        size_t l = 2 * i + 1, r = l + 1, m = i;
+        if (l < n && S->H.a[l].sc > S->H.a[m].sc) m = l;
+        if (r < n && S->H.a[r].sc > S->H.a[m].sc) m = r;
+        if (m == i) break;
+        { ho_mg_t t = S->H.a[i]; S->H.a[i] = S->H.a[m]; S->H.a[m] = t; }
+        i = m;
+    }
+    return top;
+}
+
+/* move cluster B by (m, t) into the frame of A and join it */
+static void ho_sync_merge(ho_ctx_t *M, ho_sync_t *S, int A, int B, int m, double t)
+{
+    int b, h, i, j, k, pl = M->ploidy + 1;
+    for (b = S->head[B]; b >= 0; b = S->next[b]) {
+        if (m) { M->rev[b] ^= 1; M->pos[b] = t - M->pos[b] - M->slen[b]; }
+        else M->pos[b] += t;
+        S->cl[b] = A;
+    }
+    for (h = 1; h < pl; h++) {                                      /* haplotype lists: B's re-sorted, merged into A's */
+        ho_ivv_t *va = &S->iv[A * pl + h], *vb = &S->iv[B * pl + h], u;
+        if (vb->n == 0) continue;
+        ho_pref = M->pos; qsort(vb->a, vb->n, sizeof(int), ho_cmp_pos);
+        kv_init(u);
+        for (i = j = 0; i < (int) va->n || j < (int) vb->n; ) {
+            k = j >= (int) vb->n || (i < (int) va->n && M->pos[va->a[i]] <= M->pos[vb->a[j]]) ? va->a[i++] : vb->a[j++];
+            kv_push(int, u, k);
+        }
+        kv_destroy(*va); *va = u; kv_destroy(*vb); kv_init(*vb);
+        S->ivmax[A * pl + h] = MAX(S->ivmax[A * pl + h], S->ivmax[B * pl + h]);
+    }
+    S->next[S->tail[A]] = S->head[B]; S->tail[A] = S->tail[B]; S->head[B] = -1;
+    S->clen[A] += S->clen[B]; S->ver[A]++; S->ver[B]++;
+}
+
+/* clusters joined to cluster A by a reading, listed in out[] (returns their number) */
+static int ho_sync_adjacent(const ho_sync_t *S, int A, int *out)
+{
+    int a, i, n = 0;
+    ((ho_sync_t *) S)->stamp++;
+    for (a = S->head[A]; a >= 0; a = S->next[a])
+        for (i = S->roff[a]; i < S->roff[a + 1]; i++) {
+            int k = S->radj[i], o = S->R.a[k].a == a ? S->R.a[k].b : S->R.a[k].a, C = S->cl[o];
+            if (C == A || S->mark[C] == S->stamp) continue;
+            S->mark[C] = S->stamp; out[n++] = C;
+        }
+    return n;
+}
+
+static const double *ho_sref;
+static int ho_cmp_strength(const void *p, const void *q)
+{
+    int a = *(const int*)p, b = *(const int*)q;
+    if (ho_sref[a] != ho_sref[b]) return ho_sref[b] > ho_sref[a] ? 1 : -1;
+    return (a > b) - (a < b);
+}
+
+static void ho_sync(ho_ctx_t *M)
+{
+    int ns = M->ns, i, k, n, rnd, big, *adj;
+    ho_sync_t S;
+    MYBZERO(&S, 1);
+    ho_sync_readings(M, &S);
+    MYMALLOC(S.cl, ns); MYMALLOC(S.next, ns); MYMALLOC(S.head, ns); MYMALLOC(S.tail, ns); MYMALLOC(S.ver, ns); MYMALLOC(S.mark, ns);
+    MYMALLOC(S.clen, ns); MYMALLOC(adj, ns + 1);
+    if (!S.cl || !S.next || !S.head || !S.tail || !S.ver || !S.mark || !S.clen || !adj) mem_alloc_error("hap order array");
+    S.iv = calloc((size_t) ns * (M->ploidy + 1), sizeof(*S.iv)); S.ivmax = calloc((size_t) ns * (M->ploidy + 1), sizeof(double));
+    if (!S.iv || !S.ivmax) mem_alloc_error("hap order array");
+    for (i = 0; i < ns; i++) {
+        S.cl[i] = S.head[i] = S.tail[i] = i; S.next[i] = -1; S.ver[i] = S.mark[i] = 0; S.clen[i] = M->slen[i];
+        M->rev[i] = 0; M->pos[i] = 0;
+        if (M->hap[i] >= 1 && M->hap[i] <= M->ploidy) {
+            kv_push(int, S.iv[i * (M->ploidy + 1) + M->hap[i]], i); S.ivmax[i * (M->ploidy + 1) + M->hap[i]] = M->slen[i];
+        }
+    }
+    for (k = 0; k < (int) S.R.n; k++) {                            /* merge clusters, best evidence first */
+        int a = S.R.a[k].a, b = S.R.a[k].b;
+        ho_mg_t g;
+        if (k > 0 && S.R.a[k - 1].a == a && S.R.a[k - 1].b == b) continue;
+        if (ho_sync_choose(M, &S, a, b, HO_SYNC_PEN, &g) && g.sc > 0) ho_heap_push(&S, &g);
+    }
+    while (S.H.n) {
+        ho_mg_t g = ho_heap_pop(&S);
+        if (S.head[g.A] < 0 || S.head[g.B] < 0 || S.ver[g.A] != g.va || S.ver[g.B] != g.vb) continue;
+        if (S.clen[g.B] > S.clen[g.A] && !ho_sync_choose(M, &S, g.B, g.A, HO_SYNC_PEN, &g)) continue;  /* the larger frame stays */
+        ho_sync_merge(M, &S, g.A, g.B, g.m, g.t);
+        n = ho_sync_adjacent(&S, g.A, adj);
+        for (i = 0; i < n; i++) {
+            int A = S.clen[g.A] >= S.clen[adj[i]] ? g.A : adj[i], B = A == g.A ? adj[i] : g.A;
+            ho_mg_t h;
+            if (ho_sync_choose(M, &S, A, B, HO_SYNC_PEN, &h) && h.sc > 0) ho_heap_push(&S, &h);
+        }
+    }
+    for (;;) {                                                      /* clusters still apart: joined to the largest, largest first */
+        ho_mg_t g;
+        int B = -1;
+        for (big = -1, i = 0; i < ns; i++) if (S.head[i] >= 0 && (big < 0 || S.clen[i] > S.clen[big])) big = i;
+        n = ho_sync_adjacent(&S, big, adj);
+        for (i = 0; i < n; i++) if (B < 0 || S.clen[adj[i]] > S.clen[B]) B = adj[i];
+        if (B < 0 || !ho_sync_choose(M, &S, big, B, 0, &g)) break;
+        ho_sync_merge(M, &S, big, B, g.m, g.t);
+    }
+    for (i = 0; i < ns; i++) M->order[i] = i;                       /* refinement, strongest sequences first */
+    for (i = 0; i < ns; i++) { M->strength[i] = 0; for (k = S.roff[i]; k < S.roff[i + 1]; k++) M->strength[i] += S.R.a[S.radj[k]].w; }
+    ho_sref = M->strength; qsort(M->order, ns, sizeof(int), ho_cmp_strength);
+    for (rnd = 0; rnd < HO_SYNC_ROUNDS; rnd++) {
+        int moved = 0;
+        for (n = 0; n < ns; n++) {
+            int s, j = M->order[n], bs = 0;
+            double bt = 0, bw;
+            S.P.n = 0;
+            for (k = S.roff[j]; k < S.roff[j + 1]; k++) {
+                int r = S.radj[k], o = S.R.a[r].a == j ? S.R.a[r].b : S.R.a[r].a;
+                ho_pr_t p;
+                if (S.cl[o] != S.cl[j]) continue;
+                p.t = ho_sync_prop(M, &S, r, j, &s); p.m = s; p.w = S.R.a[r].w; p.sl = S.R.a[r].sl;
+                kv_push(ho_pr_t, S.P, p);
+            }
+            if (S.P.n == 0) continue;
+            bw = ho_sync_best(M, &S, -1, NULL, -1, j, 0, &bs, &bt, NULL);
+            if (bw <= 0) continue;
+            if (bs != M->rev[j] || fabs(bt - M->pos[j]) > HO_MOVE_TOL) moved++;
+            M->rev[j] = (uint8) bs; M->pos[j] = bt;
+        }
+        if (!moved) break;
+    }
+    for (big = -1, i = 0; i < ns; i++) if (S.head[i] >= 0 && (big < 0 || S.clen[i] > S.clen[big])) big = i;
+    for (k = -1, i = 0; i < ns; i++) if (S.cl[i] == big && (k < 0 || M->slen[i] > M->slen[k])) k = i;
+    if (k >= 0 && M->rev[k])                                        /* the longest sequence forward */
+        for (i = 0; i < ns; i++) if (S.cl[i] == big) { M->rev[i] ^= 1; M->pos[i] = -M->pos[i] - M->slen[i]; }
+    for (i = 0; i < ns; i++) M->state[i] = S.cl[i] == big && (S.roff[i + 1] > S.roff[i] || i == big);
+    kv_destroy(S.R); kv_destroy(S.F); kv_destroy(S.P); kv_destroy(S.T); kv_destroy(S.H);
+    for (i = 0; i < ns * (M->ploidy + 1); i++) kv_destroy(S.iv[i]);
+    free(S.iv); free(S.ivmax);
+    free(S.roff); free(S.radj); free(S.cl); free(S.next); free(S.head); free(S.tail); free(S.ver); free(S.mark); free(S.clen); free(adj);
+}
+
+static void ho_run_group(ho_ctx_t *M)
+{
+    int ns = M->ns, i, s;
+    double end, mn;
+
+    ho_sync(M);
+    ho_fill_nb(M);
+
+    /* leftovers: against the backbone from their whole-overlap blocks, longest first */
+    int *left, nl = 0;
+    MYMALLOC(left, ns + 1);
+    if (!left) mem_alloc_error("hap order array");
+    for (i = 0; i < ns; i++) if (M->state[i] != 1) left[nl++] = i;
+    ho_len_ref = M->slen;
+    qsort(left, nl, sizeof(int), ho_cmp_len_desc);
+    for (i = 0; i < nl; i++) {
+        int rev; 
+        double offs, agree;
+        s = left[i];
+        if (ho_place_seq(M, s, &rev, &offs, &agree)) { 
+            M->state[s] = 1; 
+            M->rev[s] = (uint8) rev; 
+            M->pos[s] = offs; 
+        }
+    }
+    free(left);
+
+    // sequences without any usable block: stacked after the end of the layout
+    end = 0;
+    for (i = 0; i < ns; i++) 
+        if (M->state[i] == 1 && M->pos[i] + M->slen[i] > end) 
+            end = M->pos[i] + M->slen[i];
+    for (i = 0; i < ns; i++)
+        if (M->state[i] != 1) 
+            { M->state[i] = 1; M->rev[i] = 0; M->pos[i] = end; end += M->slen[i]; }
+
+    // finalise the layout by removing overlaps
+    ho_unpile(M);
+    ho_project(M);
+
+    // shift all sequences to start from position 0
+    mn = M->pos[0];
+    for (i = 1; i < ns; i++) if (M->pos[i] < mn) mn = M->pos[i];
+    for (i = 0; i < ns; i++) M->pos[i] -= mn;
+
+    // fix inversions 
+    ho_invfix(M);
 }
 
 static void build_haplotype_order(scf_block_t *blks, int nblk, ovl_t *ovls, uint64 *index,
-    hap_info_t *haps, sdict_t *dicts, const int *skip)
+    hap_info_t *haps, sdict_t *dicts, int ploidy, const int *skip)
 {
     ho_ctx_t cx;
-    int nseq, *smap;
-    int i, j, k, bmax = 0;
+    int bmax, nseq, *smap;
+    int i, j, k;
 
+    bmax = 0;
     for (i = 0; i < nblk; i++)
-        if (!(skip && skip[i]) && blks[i].nseq > bmax) bmax = blks[i].nseq;
-    if (bmax == 0) return;
+        if (!(skip && skip[i]) && blks[i].nseq > bmax) 
+            bmax = blks[i].nseq;
+    if (bmax == 0)
+        return;
 
     nseq = dicts->n;
     ho_init(&cx, dicts, bmax);
-    MYMALLOC(smap, nseq);
+    cx.ploidy = ploidy;
+
+    MYMALLOC(smap, (size_t) nseq);
+    if (!smap) mem_alloc_error("hap order array");
     for (i = 0; i < nseq; i++) smap[i] = -1;
 
     for (i = 0; i < nblk; i++) {
         const scf_block_t *blk = blks + i;
-        int ns = blk->nseq, plus_is_same, ne;
+        int ns = blk->nseq;
         if (skip && skip[i]) continue;
         if (ns == 0) continue;
         if (ns == 1) {
@@ -3609,7 +4092,9 @@ static void build_haplotype_order(scf_block_t *blks, int nblk, ovl_t *ovls, uint
         qsort(cx.gid, ns, sizeof(int), ho_cmp_int);
         for (j = 0; j < ns; j++) {
             int a = cx.gid[j];
-            smap[a] = j; cx.slen[j] = (int)dicts->s[a].len; cx.hap[j] = haps[a].hap;
+            smap[a] = j; 
+            cx.slen[j] = (int)dicts->s[a].len; 
+            cx.hap[j] = (int8) haps[a].hap;
         }
 
         /* one record per sequence pair: the direction with name(a) < name(b) */
@@ -3627,734 +4112,155 @@ static void build_haplotype_order(scf_block_t *blks, int nblk, ovl_t *ovls, uint
                 kv_push(ho_e_t, cx.E, e);
             }
         }
-        plus_is_same = ho_plus_is_same(&cx);
-        cx.B.n = 0;
-        ne = (int)kv_size(cx.E);
-        for (k = 0; k < ne; k++)
-            ho_blocks_from_ovl(&cx, kv_A(cx.E, k).o, kv_A(cx.E, k).a, kv_A(cx.E, k).b, plus_is_same);
-
-        ho_run_group(&cx, i);
+        ho_build_evidence(&cx, ploidy);
+        ho_run_group(&cx);
 
         {   /* write back; shift so that the smallest bpos is >= 0 */
-            int64 mn = 0;
-            for (j = 0; j < ns; j++) if (cx.bpos[j] < mn) mn = cx.bpos[j];
+            double mn = 1e300;
+            for (j = 0; j < ns; j++) if (cx.pos[j] < mn) mn = cx.pos[j];
             for (j = 0; j < ns; j++) {
                 int a = cx.gid[j];
+                haps[a].hap = (uint8) cx.hap[j];
                 haps[a].rev = cx.rev[j];
-                haps[a].bpos = cx.bpos[j] - mn;
-                haps[a].epos = cx.epos[j] - mn;
+                haps[a].bpos = (int64) floor(cx.pos[j] - mn + 0.5);
+                haps[a].epos = haps[a].bpos + cx.slen[j];
             }
         }
         for (j = 0; j < ns; j++) smap[cx.gid[j]] = -1;
     }
+
     free(smap);
     ho_destroy(&cx);
 }
 
-/*  merge a given subset of ordered groups
- *
- * ho_merge_group_subset(): merge the groups blks[gs[0..ng)] (each already ordered by build_haplotype_order, layout in
- * haps[].bpos/epos/rev) into ONE block, without deciding whether they should be merged.
- *   1. every pair of groups linked by overlaps is scored: strand + offset of the overlaps (as in ho_merge_groups),
- *      weight = consistent overlap weight - 3 * same-haplotype collision;
- *   2. a maximum spanning forest over these pair scores fixes flip and offset of every group relative to the
- *      largest group (groups not linked at all are appended after the end, components in order of size);
- *   3. boundary refinement (refine_passes sweeps): every sequence that overlaps a sequence of another group may move
- *      (position and strand) to the place that maximises  sum(w * (1 - |residual| / tol))  over its overlaps minus
- *      3 * same-haplotype collision; moves must gain at least 5% of the sequence's overlap weight.
- * Updates haps[].rev / bpos / epos (min bpos = 0) and haps[].grp (= grp of the first sequence of blks[gs[0]]).
- * Returns a newly allocated block (seqs = id << 1 | rev sorted by bpos, type copied; free seqs, type and the block
- * itself) or NULL when nothing was merged.  blks is not modified. 
- * 
- * */
-#define HO_MERGE_MINBLK 30000
-#define HO_MERGE_COLL_TOL 50000
-typedef struct { int a, b, ab, ae, bb, be, rel; int64 w; } ho_mb_t;
-typedef struct { int ra, rb, idx; } ho_mbk_t;
-typedef struct { double gain, d; int x, y, f, ks, ke; } ho_mcand_t;
-typedef struct { int hap, g; double b, e; } ho_mi_t;
-typedef struct { double d; int64 w; } ho_dw_t;
-typedef struct { int id, g; uint32 type; } ho_sg_t;
-typedef struct { int x, y, f; double d, w; } ho_ge_t;
-typedef struct { int64 key; int id; } ho_kid_t;
-typedef kvec_t(ho_mb_t) ho_mbv_t;
-typedef struct {
-    const ho_mb_t *mb; const int *slen, *hap, *adj, *aoff, *hlist, *hoff;
-    double *pb, *pe; uint8 *prv;
-} ho_br_t;
-typedef struct {
-    const ho_mb_t *mb; const int *slen; const int *hap;
-    int *root; double *pb, *pe; uint8 *prv; double *lo, *hi; ho_ivec_t *mem;
-    kvec_t(ho_mi_t) iv; kvec_t(ho_dw_t) dw;
-    double tmin, max_coll, single_mult;
-} ho_mg_t;
-
-static int ho_cmp_kid(const void *p, const void *q)
+static int merge_haplotype_groups(scf_block_t *blks, int nblk, int *unions, int *single)
 {
-    const ho_kid_t *x = p, *y = q;
-    if (x->key != y->key) return x->key < y->key ? -1 : 1;
-    return (x->id > y->id) - (x->id < y->id);
-}
-static int ho_cmp_kid_desc(const void *p, const void *q)
-{
-    const ho_kid_t *x = p, *y = q;
-    if (x->key != y->key) return x->key > y->key ? -1 : 1;
-    return (x->id > y->id) - (x->id < y->id);
-}
+    int i, j, k, n, t;
 
-static int ho_cmp_mbk(const void *p, const void *q)
-{
-    const ho_mbk_t *x = p, *y = q;
-    if (x->ra != y->ra) return x->ra < y->ra ? -1 : 1;
-    if (x->rb != y->rb) return x->rb < y->rb ? -1 : 1;
-    return (x->idx > y->idx) - (x->idx < y->idx);
-}
-
-static int ho_cmp_mi(const void *p, const void *q)
-{
-    const ho_mi_t *x = p, *y = q;
-    if (x->hap != y->hap) return x->hap < y->hap ? -1 : 1;
-    return (x->b > y->b) - (x->b < y->b);
-}
-
-static int ho_cmp_dw(const void *p, const void *q)
-{
-    const ho_dw_t *x = p, *y = q;
-    return (x->d > y->d) - (x->d < y->d);
-}
-
-static int ho_cmp_sg(const void *p, const void *q)
-{
-    int a = ((const ho_sg_t*)p)->id, b = ((const ho_sg_t*)q)->id;
-    return (a > b) - (a < b);
-}
-
-static int ho_cmp_ge(const void *p, const void *q)
-{
-    const ho_ge_t *x = p, *y = q;
-    if (x->w != y->w) return x->w > y->w ? -1 : 1;
-    if (x->x != y->x) return x->x < y->x ? -1 : 1;
-    return (x->y > y->y) - (x->y < y->y);
-}
-
-static int ho_sg_find(const ho_sg_t *a, int n, int id)
-{
-    int lo = 0, hi = n - 1;
-    while (lo <= hi) { int m = (lo + hi) >> 1; if (a[m].id == id) return m; if (a[m].id < id) lo = m + 1; else hi = m - 1; }
-    return -1;
-}
-
-static void ho_mb_from_ovl(const ovl_t *ov, int a, int b, int plus_is_same, ho_mbv_t *v)
-{
-    ho_mb_t m; int j;
-    m.a = a; m.b = b;
-    if (ov->nfrag > 0) {
-        for (j = 0; j < ov->nfrag; j++) {
-            const ovl_frag_t *fr = ov->frags + j;
-            m.ab = fr->abpos; m.ae = fr->aepos; m.bb = fr->bbpos; m.be = fr->bepos; m.rel = fr->rev;
-            m.w = MIN(m.ae - m.ab, m.be - m.bb);
-            if (m.w >= HO_MERGE_MINBLK) kv_push(ho_mb_t, *v, m);
-        }
-    } else {
-        int raw = (ov->arev != ov->brev);
-        m.ab = ov->abpos; m.ae = ov->aepos; m.bb = ov->bbpos; m.be = ov->bepos; m.rel = plus_is_same ? raw : 1 - raw;
-        m.w = MIN(m.ae - m.ab, m.be - m.bb);
-        if (m.w >= HO_MERGE_MINBLK) kv_push(ho_mb_t, *v, m);
-    }
-}
-
-/* objective of placing sequence s at (p, r): overlap consistency minus collision */
-static double ho_br_eval(const ho_br_t *B, int s, double p, int r)
-{
-    double J = 0, coll = 0;
-    int L = B->slen[s], i;
-    for (i = B->aoff[s]; i < B->aoff[s + 1]; i++) {
-        const ho_mb_t *m = B->mb + B->adj[i];
-        int t; double ms, mt, ps, pt, tol, res;
-        if (m->a == s) { t = m->b; ms = (m->ab + m->ae) / 2.0; mt = (m->bb + m->be) / 2.0; }
-        else           { t = m->a; ms = (m->bb + m->be) / 2.0; mt = (m->ab + m->ae) / 2.0; }
-        if ((r ^ B->prv[t]) != m->rel) continue;
-        ps = r ? p + (L - ms) : p + ms;
-        pt = B->prv[t] ? B->pb[t] + (B->slen[t] - mt) : B->pb[t] + mt;
-        tol = MAX(200000., 0.15 * (double) m->w);
-        res = fabs(ps - pt);
-        if (res < tol) J += (double) m->w * (1. - res / tol);
-    }
-    for (i = B->hoff[B->hap[s]]; i < B->hoff[B->hap[s] + 1]; i++) {
-        int t = B->hlist[i]; double ov;
-        if (t == s) continue;
-        ov = MIN(p + L, B->pe[t]) - MAX(p, B->pb[t]) - HO_MERGE_COLL_TOL;
-        if (ov > 0) coll += ov;
-    }
-    return J - 3. * coll;
-}
-
-/* bp of same-haplotype overlap between x and (flipped f, shifted d) y in the merged layout */
-static double ho_mg_coll(ho_mg_t *G, int x, int y, int f, double d)
-{
-    int k;
-    double coll = 0;
-    G->iv.n = 0;
-    for (k = 0; k < (int) G->mem[x].n; k++) {
-        int s = kv_A(G->mem[x], k); ho_mi_t t;
-        t.hap = G->hap[s]; t.g = 0; t.b = G->pb[s]; t.e = G->pe[s];
-        kv_push(ho_mi_t, G->iv, t);
-    }
-    for (k = 0; k < (int) G->mem[y].n; k++) {
-        int s = kv_A(G->mem[y], k); ho_mi_t t;
-        t.hap = G->hap[s]; t.g = 1;
-        if (f) { t.b = G->lo[y] + G->hi[y] - G->pe[s] + d; t.e = G->lo[y] + G->hi[y] - G->pb[s] + d; }
-        else   { t.b = G->pb[s] + d; t.e = G->pe[s] + d; }
-        kv_push(ho_mi_t, G->iv, t);
-    }
-    qsort(G->iv.a, G->iv.n, sizeof(ho_mi_t), ho_cmp_mi);
-    for (k = 0; k < (int) G->iv.n; k++) {
-        int j;
-        for (j = k + 1; j < (int) G->iv.n && G->iv.a[j].hap == G->iv.a[k].hap && G->iv.a[j].b < G->iv.a[k].e; j++) {
-            double ov;
-            if (G->iv.a[j].g == G->iv.a[k].g) continue;
-            ov = MIN(G->iv.a[k].e, G->iv.a[j].e) - G->iv.a[j].b - HO_MERGE_COLL_TOL;
-            if (ov > 0) coll += ov;
-        }
-    }
-    return coll;
-}
-
-/* strand and offset of group y relative to group x (y -> x frame) from the blocks bidx[0..nb) between them;
- * returns 0 if the dominant strand has less than min_frac of the weight */
-static int ho_mg_pair(ho_mg_t *G, const int *bidx, int nb, int x, int y, double min_frac, int *of, double *od,
-                      double *oscons, double *owf, int *onsup)
-{
-    int k, f, nsup = 0;
-    double wf[2] = {0, 0}, wtot, d = 0, half, acc, scons = 0;
-    int *fk;
-    G->dw.n = 0;
-    MYMALLOC(fk, (size_t)(nb + 1));
-    for (k = 0; k < nb; k++) {          /* strand vote */
-        const ho_mb_t *m = G->mb + bidx[k];
-        int a = m->a, b = m->b;
-        if (G->root[a] != x) { int t = a; a = b; b = t; }
-        fk[k] = G->prv[a] ^ G->prv[b] ^ m->rel;
-        wf[fk[k]] += (double) m->w;
-    }
-    f = wf[1] > wf[0]; wtot = wf[0] + wf[1];
-    if (wf[f] < min_frac * wtot) { free(fk); return 0; }
-    for (k = 0; k < nb; k++) {          /* offsets implied by each block */
-        const ho_mb_t *m = G->mb + bidx[k];
-        int a = m->a, b = m->b, ab = m->ab, ae = m->ae, bb = m->bb, be = m->be;
-        double pa, pbm; ho_dw_t t;
-        if (fk[k] != f) continue;
-        if (G->root[a] != x) { int s2; s2 = a; a = b; b = s2; s2 = ab; ab = bb; bb = s2; s2 = ae; ae = be; be = s2; }
-        pa = G->prv[a] ? G->pb[a] + (G->slen[a] - (ab + ae) / 2.0) : G->pb[a] + (ab + ae) / 2.0;
-        pbm = G->prv[b] ? G->pb[b] + (G->slen[b] - (bb + be) / 2.0) : G->pb[b] + (bb + be) / 2.0;
-        if (f) pbm = G->lo[y] + G->hi[y] - pbm;
-        t.d = pa - pbm; t.w = m->w;
-        kv_push(ho_dw_t, G->dw, t);
-    }
-    free(fk);
-    qsort(G->dw.a, G->dw.n, sizeof(ho_dw_t), ho_cmp_dw);
-    half = 0;
-    for (k = 0; k < (int) G->dw.n; k++) half += (double) G->dw.a[k].w;
-    half *= 0.5; acc = 0;
-    for (k = 0; k < (int) G->dw.n; k++) { acc += (double) G->dw.a[k].w; if (acc >= half) { d = G->dw.a[k].d; break; } }
-    for (k = 0; k < (int) G->dw.n; k++) {
-        double tol = MAX(200000., 0.15 * (double) G->dw.a[k].w);
-        if (fabs(G->dw.a[k].d - d) <= tol) { scons += (double) G->dw.a[k].w; nsup++; }
-    }
-    *of = f; *od = d; *oscons = scons; *owf = wf[f]; *onsup = nsup;
-    return 1;
-}
-
-/* inversion detection on a merged block (same idea as the events in ho_run_group, on rigid sequences)
- * 1. every sequence is checked against its overlap partners: the maximum-weight run of blocks that contradict the
- *    sequence's strand/position (>= 300 kb) is a candidate inverted segment, placed where its partners imply;
- *    a sequence then consists of up to 3 pieces (strand switches inside it give junctions);
- * 2. complementary junctions (L / R) of the same haplotype with matching coordinates (500 kb) form an inversion event;
- *    candidates without a partner junction are discarded (the sequence stays as it was);
- * 3. all pieces of that haplotype inside an event are mirrored back (native view) and every sequence gets its native
- *    strand / position from the length-weighted fit of its pieces.
- * Returns the number of events; pb / pe / prv are updated. */
-typedef struct { double mid, pt; int64 w; int dis, lo, hi, des; } ho_vote_t;
-typedef struct { double x; int dA, dD; } ho_pt_t;
-static int ho_cmp_pt(const void *p, const void *q)
-{
-    const ho_pt_t *x = p, *y = q;
-    return (x->x > y->x) - (x->x < y->x);
-}
-
-static int ho_cmp_vote(const void *p, const void *q)
-{
-    const ho_vote_t *x = p, *y = q;
-    return (x->mid > y->mid) - (x->mid < y->mid);
-}
-
-#define HO_INV_MIN_GAIN 3e5
-
-static int ho_subset_inversions(const ho_br_t *B, int n, const ho_sg_t *sg, const sdict_t *dicts)
-{
-    double *pb = B->pb, *pe = B->pe;
-    uint8 *prv = B->prv;
-    ho_piece_t *pc;
-    int *np, s, i, j, k, maxdeg = 0, nev, nj;
-    uint8 *cand, *used;
-    double *agf;
-    ho_vote_t *vt;
-    ho_pt_t *pts;
-    ho_dw_t *cb;
-    kvec_t(ho_junc_t) J;
-    kvec_t(ho_event_t) EV;
-    kvec_t(ho_pair_t) pairs;
-
-    (void) sg; (void) dicts;
-    for (s = 0; s < n; s++) if (B->aoff[s + 1] - B->aoff[s] > maxdeg) maxdeg = B->aoff[s + 1] - B->aoff[s];
-    MYMALLOC(pc, 3 * (size_t) n); MYMALLOC(np, (size_t) n); MYCALLOC(cand, (size_t) n); MYMALLOC(agf, (size_t) n);
-    MYMALLOC(vt, (size_t) maxdeg + 1); MYMALLOC(cb, (size_t) maxdeg + 1); MYMALLOC(pts, 2 * (size_t) maxdeg + 2);
-    kv_init(J); kv_init(EV); kv_init(pairs);
-    for (s = 0; s < n; s++) {
-        int L = B->slen[s], nv = 0, lo, hi, orun, nc = 0, o = prv[s];
-        double w0 = 0, w1 = 0, tw = 0, acc = 0, b_r = 0;
-        np[s] = 1; agf[s] = 1;
-        pc[3 * s].lo = 0; pc[3 * s].hi = L; pc[3 * s].o = o; pc[3 * s].b = pb[s]; pc[3 * s].e = pb[s] + L; pc[3 * s].ev = -1;
-        for (i = B->aoff[s]; i < B->aoff[s + 1]; i++) {
-            const ho_mb_t *m = B->mb + B->adj[i];
-            int t; double ms, mt, ps, tol; ho_vote_t v;
-            if (m->a == s) { t = m->b; ms = (m->ab + m->ae) / 2.0; mt = (m->bb + m->be) / 2.0; v.lo = m->ab; v.hi = m->ae; }
-            else           { t = m->a; ms = (m->bb + m->be) / 2.0; mt = (m->ab + m->ae) / 2.0; v.lo = m->bb; v.hi = m->be; }
-            v.des = B->prv[t] ^ m->rel;
-            v.pt = B->prv[t] ? B->pb[t] + (B->slen[t] - mt) : B->pb[t] + mt;
-            ps = o ? pb[s] + (L - ms) : pb[s] + ms;
-            tol = MAX(200000., 0.15 * (double) m->w);
-            v.dis = (v.des != o) || fabs(ps - v.pt) > tol;
-            v.mid = ms; v.w = m->w;
-            vt[nv++] = v;
-        }
-        {   /* how well does the current layout agree with the partners? (native-mirrored sequences do not) */
-            double wa = 0, wt = 0;
-            for (i = 0; i < nv; i++) { wt += (double) vt[i].w; if (!vt[i].dis) wa += (double) vt[i].w; }
-            agf[s] = wt > 0 ? wa / wt : 1;
-        }
-        if (nv < 2) continue;
-        qsort(vt, nv, sizeof(ho_vote_t), ho_cmp_vote);
-        {   /* coverage vote along the sequence: stretches where contradicting overlaps outnumber agreeing ones */
-            int np2 = 0, A = 0, D = 0, in = 0;
-            double bestgain = 0, sx1 = 0, sx2 = 0, startx = 0, prevx = 0, gain = 0;
-            for (i = 0; i < nv; i++) {
-                pts[np2].x = vt[i].lo; pts[np2].dA = vt[i].dis ? 0 : 1; pts[np2].dD = vt[i].dis ? 1 : 0; np2++;
-                pts[np2].x = vt[i].hi; pts[np2].dA = vt[i].dis ? 0 : -1; pts[np2].dD = vt[i].dis ? -1 : 0; np2++;
-            }
-            qsort(pts, np2, sizeof(ho_pt_t), ho_cmp_pt);
-            for (i = 0; i < np2; ) {
-                double x = pts[i].x;
-                if (in) gain += (double) (D - A) * (x - prevx);           /* net contradicting coverage (bp x overlaps) */
-                while (i < np2 && pts[i].x == x) { A += pts[i].dA; D += pts[i].dD; i++; }
-                if (!in && D > A) { in = 1; startx = x; gain = 0; }
-                else if (in && D <= A) { in = 0; if (gain > bestgain && x - startx >= 50000) { bestgain = gain; sx1 = startx; sx2 = x; } }
-                prevx = x;
-            }
-            if (bestgain < HO_INV_MIN_GAIN) continue;
-            lo = (int) sx1; hi = (int) sx2;
-        }
-        if (lo < 0) lo = 0;
-        if (hi > L) hi = L;
-        if (lo < 100000) lo = 0;
-        if (L - hi < 100000) hi = L;
-        for (i = 0; i < nv; i++) {
-            double ov = MIN(vt[i].hi, hi) - MAX(vt[i].lo, lo);
-            if (!vt[i].dis || ov <= 0) continue;
-            if (vt[i].des) w1 += ov; else w0 += ov;
-        }
-        orun = w1 > w0;
-        if (orun == o || hi - lo < 100000) continue;     /* positional disagreement only: not an inversion */
-        for (i = 0; i < nv; i++) {
-            double ov = MIN(vt[i].hi, hi) - MAX(vt[i].lo, lo);
-            if (!vt[i].dis || vt[i].des != orun || ov <= 0) continue;
-            cb[nc].d = vt[i].pt - (orun ? (hi - vt[i].mid) : (vt[i].mid - lo)); cb[nc].w = (int64) ov; tw += ov; nc++;
-        }
-        if (!nc) continue;
-        qsort(cb, nc, sizeof(ho_dw_t), ho_cmp_dw);
-        for (i = 0; i < nc; i++) { acc += (double) cb[i].w; if (acc >= 0.5 * tw) { b_r = cb[i].d; break; } }
-        k = 0;
-        if (lo > 0) {
-            pc[3 * s + k].lo = 0; pc[3 * s + k].hi = lo; pc[3 * s + k].o = o; pc[3 * s + k].ev = -1;
-            pc[3 * s + k].b = pb[s] + (o ? L - lo : 0); pc[3 * s + k].e = pc[3 * s + k].b + lo; k++;
-        }
-        pc[3 * s + k].lo = lo; pc[3 * s + k].hi = hi; pc[3 * s + k].o = orun; pc[3 * s + k].ev = -1;
-        pc[3 * s + k].b = b_r; pc[3 * s + k].e = b_r + (hi - lo); k++;
-        if (hi < L) {
-            pc[3 * s + k].lo = hi; pc[3 * s + k].hi = L; pc[3 * s + k].o = o; pc[3 * s + k].ev = -1;
-            pc[3 * s + k].b = pb[s] + (o ? 0 : hi); pc[3 * s + k].e = pc[3 * s + k].b + (L - hi); k++;
-        }
-        np[s] = k; cand[s] = 1;
-    }
-    /* junctions of the strand-switching candidates */
-    for (s = 0; s < n; s++) {
-        if (!cand[s]) continue;
-        for (k = 0; k + 1 < np[s]; k++) {
-            const ho_piece_t *p = pc + 3 * s + k, *q = p + 1;
-            double u, v, lo_, hi_; int su, sv, slo, shi; ho_junc_t jn;
-            if (p->o == q->o) continue;
-            u = p->o ? p->b : p->e; su = p->o;
-            v = q->o ? q->e : q->b; sv = q->o;
-            if (u > v) { lo_ = v; slo = 1 - sv; hi_ = u; shi = 1 - su; }
-            else       { lo_ = u; slo = su; hi_ = v; shi = sv; }
-            jn.c = s; jn.hap = B->hap[s]; jn.a = lo_; jn.b = hi_; jn.kind = (slo == 0 && shi == 1) ? 0 : 1;
-            kv_push(ho_junc_t, J, jn);
-        }
-    }
-    nj = (int) kv_size(J);
-    for (i = 0; i < nj; i++)
-        for (j = 0; j < nj; j++) {
-            const ho_junc_t *x = &kv_A(J, i), *y = &kv_A(J, j);
-            if (x->kind == 0 && y->kind == 1 && x->hap == y->hap && fabs(x->a - y->a) < HO_TOL && fabs(x->b - y->b) < HO_TOL) {
-                ho_pair_t pr; pr.d = fabs(x->a - y->a) + fabs(x->b - y->b); pr.i = i; pr.j = j;
-                kv_push(ho_pair_t, pairs, pr);
-            }
-        }
-    if (pairs.n > 1) qsort(pairs.a, pairs.n, sizeof(ho_pair_t), ho_cmp_pair);
-    MYCALLOC(used, (size_t) nj + 1);
-    for (i = 0; i < (int) pairs.n; i++) {
-        const ho_junc_t *x, *y; ho_event_t ev;
-        if (used[kv_A(pairs, i).i] || used[kv_A(pairs, i).j]) continue;
-        used[kv_A(pairs, i).i] = used[kv_A(pairs, i).j] = 1;
-        x = &kv_A(J, kv_A(pairs, i).i); y = &kv_A(J, kv_A(pairs, i).j);
-        ev.hap = x->hap; ev.idn = 0; ev.a = (x->a + y->a) / 2; ev.b = (x->b + y->b) / 2;
-        ev.nbr = 2; ev.br[0] = x->c; ev.br[1] = y->c;
-        kv_push(ho_event_t, EV, ev);
-#ifdef DEBUG_HAP_ORDER
-        fprintf(stderr, "[M::%s] inversion hap %d: %.0f - %.0f (bridging %s, %s)\n", __func__, 
-            ev.hap, ev.a, ev.b, dicts->s[sg[x->c].id].name, dicts->s[sg[y->c].id].name);
-#endif
-    }
-    nev = (int) kv_size(EV);
-    /* discard candidates whose junction found no partner */
-    {
-        int jc = 0;
-        uint8 *keep; MYCALLOC(keep, (size_t) n);
-        for (s = 0; s < n; s++) {
-            if (!cand[s]) continue;
-            for (k = 0; k + 1 < np[s]; k++) if (pc[3 * s + k].o != pc[3 * s + k + 1].o) { if (used[jc]) keep[s] = 1; jc++; }
-        }
-        for (s = 0; s < n; s++)
-            if (cand[s] && !keep[s]) { np[s] = 1; pc[3 * s].lo = 0; pc[3 * s].hi = B->slen[s]; pc[3 * s].o = prv[s]; pc[3 * s].b = pb[s]; pc[3 * s].e = pb[s] + B->slen[s]; }
-        free(keep);
-    }
-    /* native pieces + per-sequence fit */
-    for (s = 0; s < n; s++) {
-        int e, oc; double x0;
-        for (k = 0; k < np[s]; k++) {
-            ho_piece_t *p = pc + 3 * s + k, q = *p;
-            double mid = (q.b + q.e) / 2;
-            for (e = 0; e < nev; e++) {
-                const ho_event_t *ev = &kv_A(EV, e);
-                /* sequences already in native view (they contradict their partners) must not be mirrored twice */
-                if (ev->hap == B->hap[s] && ev->a < mid && mid < ev->b && (np[s] > 1 || agf[s] >= 0.5)) { p->b = ev->a + ev->b - q.e; p->e = ev->a + ev->b - q.b; p->o = 1 - q.o; }
-            }
-        }
-        ho_fit(B->slen[s], pc + 3 * s, np[s], &oc, &x0);
-        pb[s] = x0; pe[s] = x0 + B->slen[s]; prv[s] = (uint8) oc;
-    }
-    free(pc); free(np); free(cand); free(agf); free(vt); free(cb); free(pts); free(used);
-    kv_destroy(J); kv_destroy(EV); kv_destroy(pairs);
-    return nev;
-}
-
-static scf_block_t *ho_merge_group_subset(const scf_block_t *blks, const int *gs, int ng, ovl_t *ovls, uint64 *index,
-    hap_info_t *haps, sdict_t *dicts, int refine_passes, int detect_inv, int *n_inv)
-{
-    ho_sg_t *sg;
-    int n = 0, i, j, k, g, plus_is_same, newgrp, nh = 0, ncomp;
-    int *slen, *hap, *root, *aoff, *adj, *hoff, *hlist, *hcnt, *par, *thead, *tnext, *tto, *bidx, *queue;
-    double *pb, *pe, *lo, *hi, *ts, *tc, cur_end = 0;
-    uint8 *prv, *vis;
-    ho_ivec_t *mem;
-    ho_mbv_t mbv;
-    ho_ctx_t tmp;
-    ho_mg_t G;
-    ho_mbk_t *key;
-    kvec_t(ho_ge_t) edges;
-    ho_kid_t *glen;
-    ho_br_t B;
-    scf_block_t *out;
-
-    if (ng <= 0) return NULL;
-    for (i = 0; i < ng; i++) n += blks[gs[i]].nseq;
-    if (n == 0) return NULL;
-    newgrp = haps[blks[gs[0]].seqs[0] >> 1].grp;
-    MYMALLOC(sg, (size_t) n);
-    for (g = 0, k = 0; g < ng; g++)
-        for (j = 0; j < blks[gs[g]].nseq; j++, k++) {
-            sg[k].id = blks[gs[g]].seqs[j] >> 1; sg[k].g = g;
-            sg[k].type = blks[gs[g]].type ? blks[gs[g]].type[j] : 0;
-        }
-    qsort(sg, n, sizeof(ho_sg_t), ho_cmp_sg);
-    MYMALLOC(slen, (size_t) n); MYMALLOC(hap, (size_t) n); MYMALLOC(root, (size_t) n);
-    MYMALLOC(pb, (size_t) n); MYMALLOC(pe, (size_t) n); MYMALLOC(prv, (size_t) n);
-    MYMALLOC(lo, (size_t) ng); MYMALLOC(hi, (size_t) ng); MYMALLOC(mem, (size_t) ng);
-    for (g = 0; g < ng; g++) { kv_init(mem[g]); lo[g] = 1e300; hi[g] = -1e300; }
-    for (i = 0; i < n; i++) {
-        int id = sg[i].id; g = sg[i].g;
-        slen[i] = (int) dicts->s[id].len; hap[i] = haps[id].hap; root[i] = g;
-        pb[i] = (double) haps[id].bpos; pe[i] = (double) haps[id].epos; prv[i] = haps[id].rev;
-        if (pb[i] < lo[g]) lo[g] = pb[i];
-        if (pe[i] > hi[g]) hi[g] = pe[i];
-        kv_push(int, mem[g], i);
-        if (hap[i] + 1 > nh) nh = hap[i] + 1;
-    }
-    /* strand convention + overlap blocks among the members (one record per pair: local a < b) */
-    ho_init(&tmp, dicts, 1);
-    tmp.ns = n;
-    for (i = 0; i < n; i++) {
-        const ovl_t *ov = ovls + (index[sg[i].id] >> 32); int cnt = (uint32) index[sg[i].id];
-        for (k = 0; k < cnt; k++, ov++) {
-            int b; ho_e_t e;
-            if (ov->del) continue;
-            b = ho_sg_find(sg, n, ov->bread);
-            if (b <= i) continue;
-            e.a = i; e.b = b; e.raw = (ov->arev != ov->brev); e.o = ov;
-            kv_push(ho_e_t, tmp.E, e);
-        }
-    }
-    plus_is_same = ho_plus_is_same(&tmp);
-    kv_init(mbv);
-    for (k = 0; k < (int) kv_size(tmp.E); k++) ho_mb_from_ovl(kv_A(tmp.E, k).o, kv_A(tmp.E, k).a, kv_A(tmp.E, k).b, plus_is_same, &mbv);
-    ho_destroy(&tmp);
-
-    /* 1. pair scores between groups */
-    memset(&G, 0, sizeof(G));
-    G.mb = mbv.a; G.slen = slen; G.hap = hap; G.root = root; G.pb = pb; G.pe = pe; G.prv = prv; G.lo = lo; G.hi = hi; G.mem = mem;
-    kv_init(G.iv); kv_init(G.dw); kv_init(edges);
-    MYMALLOC(key, mbv.n + 1); MYMALLOC(bidx, mbv.n + 1);
-    for (i = 0, k = 0; i < (int) mbv.n; i++) {
-        int ra = root[mbv.a[i].a], rb = root[mbv.a[i].b];
-        if (ra == rb) continue;
-        key[k].ra = MIN(ra, rb); key[k].rb = MAX(ra, rb); key[k].idx = i; k++;
-    }
-    qsort(key, k, sizeof(ho_mbk_t), ho_cmp_mbk);
-    for (i = 0; i < k; i = j) {
-        ho_ge_t e; int f, nsup; double d, scons, wfm, coll;
-        for (j = i; j < k && key[j].ra == key[i].ra && key[j].rb == key[i].rb; j++) bidx[j - i] = key[j].idx;
-        if (!ho_mg_pair(&G, bidx, j - i, key[i].ra, key[i].rb, 0.5, &f, &d, &scons, &wfm, &nsup) || scons <= 0) continue;
-        coll = ho_mg_coll(&G, key[i].ra, key[i].rb, f, d);
-        e.x = key[i].ra; e.y = key[i].rb; e.f = f; e.d = d; e.w = scons - 3. * coll;
-        if (e.w > 0) kv_push(ho_ge_t, edges, e);
-    }
-    /* 2. maximum spanning forest, then place groups along the trees */
-    if (edges.n > 1) qsort(edges.a, edges.n, sizeof(ho_ge_t), ho_cmp_ge);
-    MYMALLOC(par, (size_t) ng); MYMALLOC(thead, (size_t) ng); MYMALLOC(tnext, 2 * (size_t) ng + 2); MYMALLOC(tto, 2 * (size_t) ng + 2);
-    {
-        int *tedge, nt = 0;
-        MYMALLOC(tedge, 2 * (size_t) ng + 2);
-        for (g = 0; g < ng; g++) { par[g] = g; thead[g] = -1; }
-        for (i = 0; i < (int) edges.n; i++) {
-            int rx = ho_find(par, edges.a[i].x), ry = ho_find(par, edges.a[i].y);
-            if (rx == ry) continue;
-            par[rx] = ry;
-            tto[nt] = edges.a[i].y; tedge[nt] = i; tnext[nt] = thead[edges.a[i].x]; thead[edges.a[i].x] = nt++;
-            tto[nt] = edges.a[i].x; tedge[nt] = i; tnext[nt] = thead[edges.a[i].y]; thead[edges.a[i].y] = nt++;
-        }
-        MYMALLOC(ts, (size_t) ng); MYMALLOC(tc, (size_t) ng); MYMALLOC(vis, (size_t) ng); MYMALLOC(queue, (size_t) ng);
-        MYMALLOC(glen, (size_t) ng);
-        MYBZERO(vis, ng);
-        for (g = 0; g < ng; g++) {
-            int64 L = 0;
-            for (k = 0; k < (int) mem[g].n; k++) L += slen[kv_A(mem[g], k)];
-            glen[g].key = L; glen[g].id = g;
-        }
-        qsort(glen, ng, sizeof(ho_kid_t), ho_cmp_kid_desc);
-        ncomp = 0;
-        for (i = 0; i < ng; i++) {
-            int r = glen[i].id, qh = 0, qt = 0;
-            double clo = 1e300, chi = -1e300, shift;
-            if (vis[r]) continue;
-            vis[r] = 1; ts[r] = 1; tc[r] = 0; queue[qt++] = r;
-            while (qh < qt) {
-                int u = queue[qh++], e;
-                for (e = thead[u]; e >= 0; e = tnext[e]) {
-                    int v = tto[e];
-                    const ho_ge_t *ge = &edges.a[tedge[e]];
-                    double s1, c1;
-                    if (vis[v]) continue;
-                    /* transform y -> x of the edge: s = f ? -1 : 1, c = f ? loY + hiY + d : d */
-                    s1 = ge->f ? -1. : 1.; c1 = ge->f ? lo[ge->y] + hi[ge->y] + ge->d : ge->d;
-                    if (ge->x != u) { c1 = -s1 * c1; }          /* traversing y -> x: inverse transform u = s*(u' - c) */
-                    ts[v] = ts[u] * s1; tc[v] = ts[u] * c1 + tc[u];
-                    vis[v] = 1; queue[qt++] = v;
-                }
-            }
-            for (j = 0; j < qt; j++) {
-                int gq = queue[j];
-                for (k = 0; k < (int) mem[gq].n; k++) {
-                    int s = kv_A(mem[gq], k);
-                    double u1 = ts[gq] * pb[s] + tc[gq], u2 = ts[gq] * pe[s] + tc[gq];
-                    if (MIN(u1, u2) < clo) clo = MIN(u1, u2);
-                    if (MAX(u1, u2) > chi) chi = MAX(u1, u2);
-                }
-            }
-            shift = ncomp == 0 ? 0 : cur_end - clo;
-            for (j = 0; j < qt; j++) tc[queue[j]] += shift;
-            cur_end = chi + shift;
-            ncomp++;
-        }
-        free(tedge);
-    }
-    /* apply group transforms to the members */
-    for (g = 0; g < ng; g++)
-        for (k = 0; k < (int) mem[g].n; k++) {
-            int s = kv_A(mem[g], k);
-            double u1 = ts[g] * pb[s] + tc[g], u2 = ts[g] * pe[s] + tc[g];
-            pb[s] = MIN(u1, u2); pe[s] = MAX(u1, u2);
-            if (ts[g] < 0) prv[s] ^= 1;
-        }
-    /* 3. adjacency lists of the overlap blocks, same-haplotype lists */
-    if (n_inv) *n_inv = 0;
-    if (mbv.n) {
-        int *pp, *bnd, nbnd = 0, pass;
-        uint8 *isb;
-        MYCALLOC(aoff, (size_t) n + 2); MYMALLOC(adj, 2 * mbv.n + 1);
-        MYCALLOC(hoff, (size_t) nh + 2); MYMALLOC(hlist, (size_t) n + 1); MYCALLOC(hcnt, (size_t) nh + 1);
-        MYMALLOC(bnd, (size_t) n);
-        for (i = 0; i < (int) mbv.n; i++) { aoff[mbv.a[i].a + 1]++; aoff[mbv.a[i].b + 1]++; }
-        for (i = 0; i < n; i++) aoff[i + 1] += aoff[i];
-        MYCALLOC(pp, (size_t) n + 1);
-        for (i = 0; i < (int) mbv.n; i++) {
-            adj[aoff[mbv.a[i].a] + pp[mbv.a[i].a]++] = i;
-            adj[aoff[mbv.a[i].b] + pp[mbv.a[i].b]++] = i;
-        }
-        free(pp);
-        for (i = 0; i < n; i++) hoff[hap[i] + 1]++;
-        for (i = 0; i <= nh; i++) hoff[i + 1] += hoff[i];
-        for (i = 0; i < n; i++) hlist[hoff[hap[i]] + hcnt[hap[i]]++] = i;
-        B.mb = mbv.a; B.slen = slen; B.hap = hap; B.adj = adj; B.aoff = aoff; B.hlist = hlist; B.hoff = hoff;
-        B.pb = pb; B.pe = pe; B.prv = prv;
-        /* boundary refinement: sequences that overlap a sequence of another group */
-        if (refine_passes > 0) {
-            MYCALLOC(isb, (size_t) n + 1);
-            for (i = 0; i < (int) mbv.n; i++)
-                if (root[mbv.a[i].a] != root[mbv.a[i].b]) isb[mbv.a[i].a] = isb[mbv.a[i].b] = 1;
-            for (i = 0; i < n; i++) if (isb[i]) bnd[nbnd++] = i;
-            free(isb);
-            for (pass = 0; pass < refine_passes; pass++) {
-                int moved = 0;
-                for (i = 0; i < nbnd; i++) {
-                    int s = bnd[i], L = slen[s], t, r_best = prv[s];
-                    double J0 = ho_br_eval(&B, s, pb[s], prv[s]), Jb = J0, p_best = pb[s], wsum = 0;
-                    for (t = aoff[s]; t < aoff[s + 1]; t++) {
-                        const ho_mb_t *m = mbv.a + adj[t];
-                        int o, r2; double ms, mt, p2, Jc;
-                        wsum += (double) m->w;
-                        if (m->a == s) { o = m->b; ms = (m->ab + m->ae) / 2.0; mt = (m->bb + m->be) / 2.0; }
-                        else           { o = m->a; ms = (m->bb + m->be) / 2.0; mt = (m->ab + m->ae) / 2.0; }
-                        r2 = prv[o] ^ m->rel;
-                        p2 = (prv[o] ? pb[o] + (slen[o] - mt) : pb[o] + mt) - (r2 ? (L - ms) : ms);
-                        Jc = ho_br_eval(&B, s, p2, r2);
-                        if (Jc > Jb) { Jb = Jc; p_best = p2; r_best = r2; }
-                    }
-                    if (Jb > J0 + 0.05 * wsum) { pb[s] = p_best; pe[s] = p_best + L; prv[s] = (uint8) r_best; moved++; }
-                }
-                if (!moved) break;
-            }
-        }
-        /* 4. inversions at/near the boundaries -> native view */
-        if (detect_inv) {
-            int nev = ho_subset_inversions(&B, n, sg, dicts);
-            if (n_inv) *n_inv = nev;
-        }
-        free(aoff); free(adj); free(hoff); free(hlist); free(hcnt); free(bnd);
-    }
-    /* output: block sorted by position, haps updated */
-    {
-        ho_kid_t *ob; double mn = 1e300;
-        MYMALLOC(ob, (size_t) n);
-        for (i = 0; i < n; i++) { ob[i].key = (int64) rint(pb[i]); ob[i].id = i; if (pb[i] < mn) mn = pb[i]; }
-        qsort(ob, n, sizeof(ho_kid_t), ho_cmp_kid);
-        MYMALLOC(out, 1); MYMALLOC(out->seqs, (size_t) n); MYMALLOC(out->type, (size_t) n);
-        out->nseq = n; out->slen = 0;
-        for (i = 0; i < n; i++) {
-            int s = ob[i].id, id = sg[s].id;
-            out->seqs[i] = (uint32) id << 1 | prv[s]; out->type[i] = sg[s].type; out->slen += slen[s];
-            haps[id].grp = newgrp; haps[id].rev = prv[s];
-            haps[id].bpos = (int64) rint(pb[s] - mn); haps[id].epos = haps[id].bpos + slen[s];
-        }
-        free(ob);
-    }
-    for (g = 0; g < ng; g++) kv_destroy(mem[g]);
-    free(sg); free(slen); free(hap); free(root); free(pb); free(pe); free(prv); free(lo); free(hi); free(mem);
-    free(key); free(bidx); free(par); free(thead); free(tnext); free(tto); free(ts); free(tc); free(vis); free(queue);
-    free(glen);
-    kv_destroy(mbv); kv_destroy(G.iv); kv_destroy(G.dw); kv_destroy(edges);
-    return out;
-}
-
-#define HO_MERGE_REFINE_PASSES 10
-
-static int build_haplotype_order_in_merged_groups(scf_block_t *blks, int ngrp, int *unions, 
-    ovl_t *ovls, uint64 *index, hap_info_t *haps, sdict_t *dicts, ord_i64_t *sords)
-{
-    scf_block_t *blk;
-    int i, j, k, n;
-    
     // union groups and assign final group ids
-    MYBZERO(sords, ngrp);
-    for (i = 0; i < ngrp; i++) {
-        if (unions[i] < 0) {
-            sords[i] = (ord_i64_t){i, i};
-            continue;
-        }
+    for (i = 0; i < nblk; i++) {
         k = i;
-        while (unions[k] >= 0)
-            k = unions[k];
+        while (unions[k] >= 0) k = unions[k];
         j = i;
-        while (j != k) {
-            sords[j] = (ord_i64_t){j, k};
-            j = unions[j];
-        }
+        while (unions[j] >= 0) { t = j; j = unions[j]; unions[t] = k; }
     }
 
-    // sort by final group ids
-    qsort(sords, ngrp, sizeof(ord_i64_t), ord_i64_dcmpfunc);
+    // count sequence number in each union group
+    MYBZERO(single, nblk);
+    for (i = 0; i < nblk; i++) {
+        k = unions[i] >= 0? unions[i] : i;
+        single[k] += blks[i].nseq;
+    }
+    for (i = 0; i < nblk; i++) {
+        if ((n = single[i]) == 0) continue;
+        MYREALLOC(blks[i].seqs, n);
+    }
 
-    // process each union
-    for (i = 1, j = 0, k = sords[0].event; i <= ngrp; i++) {
-        if (i == ngrp || sords[i].event != k) {
-            // process the union from j to i-1
-            n = 0;
-            for (k = j; k < i; k++)
-                unions[n++] = sords[k].which;
-            if (n > 1) {
-                blk = ho_merge_group_subset(blks, unions, n, ovls, index, haps, dicts, HO_MERGE_REFINE_PASSES, 1, NULL);
-                k = unions[0];
-                free(blks[k].seqs);
-                free(blks[k].type);
-                blks[k] = *blk;
-                for (k = 1; k < n; k++)
-                    blks[unions[k]].nseq = 0; // mark as merged
-            }
-            j = i;
-            if (i < ngrp) k = sords[i].event;
-        }
+    // count group number in each union group
+    MYBZERO(single, nblk);
+    for (i = 0; i < nblk; i++) {
+        k = unions[i] >= 0? unions[i] : i;
+        single[k] += 1;
+    }
+
+    // collect sequences into the union groups
+    for (i = 0; i < nblk; i++) {
+        if ((k = unions[i]) < 0) continue;
+        memcpy(blks[k].seqs + blks[k].nseq, 
+            blks[i].seqs, 
+            blks[i].nseq * sizeof(uint32));
+        blks[k].nseq += blks[i].nseq;
+        blks[k].slen += blks[i].slen;
     }
 
     // compact blks array
-    for (i = j = 0; i < ngrp; i++) {
-        if (blks[i].nseq == 0) {
+    for (i = j = 0; i < nblk; i++) {
+        if (unions[i] >= 0) {
             free(blks[i].seqs);
-            free(blks[i].type);
             continue;
         }
         if (i != j)
             blks[j] = blks[i];
+        single[j] = (single[i] <= 1);
         j++;
     }
-    ngrp = j;
+    nblk = j;
+
+    return nblk;
+}
+
+// process unassigned sequences (if any)
+// each sequence will be a separate group    
+static int fix_haplotype_group(scf_block_v *blkv, hap_info_t *haps, sdict_t *dicts)
+{
+    scf_block_t *blk;
+    uint32 s, *a, *seqs;
+    int64 p, l, l_uns, off;
+    int8 h;
+    int i, j, k, n, n_uns;
+    int nblk = blkv->n;
+    
+    l_uns = 0;
+    n_uns = 0;
+    for (i = 0; i < nblk; i++) {
+        blk = blkv->a + i;
+        n = blk->nseq;
+        seqs = blk->seqs;
+        k = 0;
+        l = 0;
+        for (j = 0; j < n; j++) {
+            s = seqs[j] >> 1;
+            if ((h = (int8) haps[s].hap) > 0)
+                seqs[k++] = seqs[j];
+            else {
+                // add a new group
+                l += dicts->s[s].len;
+                MYMALLOC(a, 1);
+                a[0] = s << 1;
+                kv_push(scf_block_t, *blkv, ((scf_block_t){1, a, dicts->s[s].len}));
+                haps[s].hap  = -h; // reset hap
+                haps[s].bpos = 0;
+                haps[s].epos = dicts->s[s].len;
+                n_uns += 1;
+
+                fprintf(stderr, "[M::%s] unassigned sequence %s of length %10d\n", __func__, dicts->s[s].name, dicts->s[s].len);
+            }
+        }
+        l_uns += l;
+        blk->nseq  = k;
+        blk->slen -= l;
+    }
+
+    // report unassigned sequences
+    if (n_uns > 0)
+        fprintf(stderr, "[M::%s] unassigned %d extra-copied sequences of %lld bp\n", __func__, n_uns, l_uns);
+
+    // update group number
+    nblk = blkv->n;
 
     // update haps[].grp
-    for (i = 0; i < ngrp; i++) {
-        blk = blks + i;
+    for (i = 0; i < nblk; i++) {
+        blk = blkv->a + i;
         for (j = 0; j < blk->nseq; j++)
             haps[blk->seqs[j]>>1].grp = i+1;
     }
 
-    return ngrp;
+    // fix start positions for each block
+    for (i = 0; i < nblk; i++) {
+        blk = blkv->a + i;
+        off = INT64_MAX;
+        for (j = 0; j < blk->nseq; j++)
+            if ((p = haps[blk->seqs[j]>>1].bpos) < off)
+                off = p;
+        if (!off) continue;
+        for (j = 0; j < blk->nseq; j++) {
+            s = blk->seqs[j]>>1;
+            haps[s].bpos -= off;
+            haps[s].epos -= off;
+        }
+    }
+
+    return nblk;
 }
 
 static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, sdict_t *dicts, 
@@ -4363,7 +4269,7 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
     if (ovls == NULL || !novl)
         return;
 
-    kvec_t(scf_block_t) blks;
+    scf_block_v blks;
     scf_block_t *blk;
     ovl_t *ovl, *ob, *oe;
     range_t *rngs;
@@ -4372,7 +4278,7 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
     kvec_t(ext_info_t) exts;
     kvec_t(ext_clus_t) clus;
     uint64 *index;
-    uint32 s, a, b, *cseqs, *ctype;
+    uint32 s, a, b, *cseqs;
     uint8 *rmarks, *qmarks;
     int64 i, j, k, l, p, q, g, n, movl, nseq, nrng, slen, ncseq, lowcpy, fovls[2];
     int ga, gb, beg, end, ext, ngrp, *ncov, *grps, *cpts;
@@ -4390,13 +4296,12 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
     MYMALLOC(sords, nseq);
     MYMALLOC(qords, nseq);
     MYMALLOC(cseqs, nseq);
-    MYMALLOC(ctype, nseq);
     MYMALLOC(rmarks, nseq);
     MYMALLOC(qmarks, nseq);
     
     if (covs == NULL || covs[0] == NULL || ncov == NULL || 
         grps == NULL || sords == NULL || qords == NULL ||
-        index == NULL || cseqs == NULL || ctype == NULL || 
+        index == NULL || cseqs == NULL || 
         rmarks == NULL || qmarks == NULL)
         mem_alloc_error("scaffold partition");
     
@@ -4464,13 +4369,13 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
         if (rmarks[a]) {
             a = a << 1;
             ncseq = 0;
-            cseqs[ncseq] = a, ctype[ncseq] = 0, ncseq++;
+            cseqs[ncseq++] = a;
             goto add_block; // likely repeat, skip
         }
         // left extension
         a = a << 1 | 1;
         ncseq = 0;
-        cseqs[ncseq] = a, ctype[ncseq] = 0, ncseq++;
+        cseqs[ncseq++] = a;
         while (1) {
             ovl = ovls + (index[a>>1] >> 32);
             n = (uint32) index[a>>1];
@@ -4569,7 +4474,7 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
             // add to backbone
             a = s;
             grps[a>>1] = (a&1)? -ngrp : ngrp;
-            cseqs[ncseq] = a, ctype[ncseq] = 0, ncseq++;
+            cseqs[ncseq++] = a;
         }
         
         // reverse the array
@@ -4687,7 +4592,7 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
             // add to backbone
             a = s;
             grps[a>>1] = (a&1)? -ngrp : ngrp;
-            cseqs[ncseq] = a, ctype[ncseq] = 0, ncseq++;
+            cseqs[ncseq++] = a;
         }
 
 #ifdef DEBUG_SCAFFOLD_PARTITION
@@ -4748,7 +4653,7 @@ static void build_scaffold_partition(ovl_t *ovls, int64 novl, hap_info_t *haps, 
                 }
                 if (nrng && rangelist_size(rngs, nrng, 0) >= dicts->s[a].len * BACKBONE_MIN_RECRUIT) {
                     // grps[a] = fovls[1] > fovls[0]? -ngrp : ngrp;
-                    cseqs[ncseq] = (a << 1) | (fovls[1] > fovls[0]), ctype[ncseq] = g, ncseq++;
+                    cseqs[ncseq++] = (a << 1) | (fovls[1] > fovls[0]);
                 } else qords[k++] = qords[j]; // keep for next round
             }
             // set groups outside the loop for a strict recruitment order
@@ -4797,291 +4702,12 @@ add_block:
         kv_pushp(scf_block_t, blks, &blk);
         blk->nseq = ncseq;
         MYMALLOC(blk->seqs, ncseq), memcpy(blk->seqs, cseqs, ncseq * sizeof(uint32));
-        MYMALLOC(blk->type, ncseq), memcpy(blk->type, ctype, ncseq * sizeof(uint32));
         blk->slen = slen;
 
 #ifdef DEBUG_SCAFFOLD_PARTITION
         fprintf(stderr, "[M::%s] scaffold group %d after recruitment: %lld sequences [%lld bp]\n", __func__, ngrp, ncseq, slen);
 #endif
     }
-
-    /***
-    // order groups within-group according to backbone positions
-    {
-        bb_range_t *bbrngs;
-        ovl_t *bb_o;
-        int64 bp, bmax, bb_cpos, bpos_min;
-        uint32 bb_r, bb_v, bb_s, bb_t, bb_n, bb_ww, *bseqs, *btype;
-        double bb_bsum, bb_esum, bb_ssum;
-        int bb_x, bb_y, bnseq, bb_alen, bb_blen, bb_bshift, bb_eshift, bb_bgap, bb_egap, *smap_blk;
-        
-        // find largest block for bbrngs allocation
-        bmax = 0;
-        for (i = 0; i < blks.n; i++)
-            if (blks.a[i].nseq > bmax) bmax = blks.a[i].nseq;
-
-        MYMALLOC(bbrngs,    bmax);
-        MYCALLOC(smap_blk,  nseq);
-        for (i = 0; i < nseq; i++) smap_blk[i] = -1;
-
-        // compute backbone positions within each group
-        for (i = 0; i < blks.n; i++) {
-            blk = blks.a + i;
-            bseqs = blk->seqs;
-            btype = blk->type;
-            bnseq = blk->nseq;
-
-            // build smap for this group
-            for (j = 0; j < bnseq; j++)
-                smap_blk[bseqs[j]>>1] = j;
-
-            for (j = 0; j < bnseq; j++) {
-                a = bseqs[j] >> 1;
-                if (!btype[j]) {
-                    // backbone sequence: position follows previous backbone end
-                    if (j > 0) {
-                        bb_cpos = bbrngs[j-1].end;
-                        bb_o = find_b_overlap(ovls + (index[a] >> 32), (uint32) index[a], bseqs[j-1]>>1);
-                        if (bb_o) bb_cpos -= bb_o->alen;
-                    } else bb_cpos = 0;
-                    bbrngs[j] = (bb_range_t){j, bb_cpos, bb_cpos + dicts->s[a].len};
-                } else {
-                    // recruited sequence: weighted anchor from already-placed sequences
-                    bb_r   = bseqs[j] & 1;
-                    bb_v   = btype[j];
-                    bb_x   = smap_blk[a];
-                    bb_alen = dicts->s[a].len;
-                    bb_o   = ovls + (index[a] >> 32);
-                    bb_n   = (uint32) index[a];
-                    bb_bsum = bb_esum = bb_ssum = 0.;
-                    bb_t   = UINT32_MAX;
-                    for (k = 0; k < bb_n; k++, bb_o++) {
-                        if (bb_o->del) continue;
-                        b = bb_o->bread;
-                        bb_y = smap_blk[b];
-                        if (bb_y < 0 || bb_y > bb_x) continue;
-                        bb_ww = btype[bb_y];
-                        if (bb_ww >= bb_v || bb_ww > bb_t) continue;
-                        bb_s = bseqs[bb_y] & 1;
-                        if ((bb_r == bb_s) != (bb_o->arev == bb_o->brev)) continue;
-                        if (bb_ww < bb_t) { bb_bsum = bb_esum = bb_ssum = 0.; bb_t = bb_ww; }
-                        bb_blen  = dicts->s[b].len;
-                        if (bb_r) { bb_bgap = bb_alen - bb_o->aepos; bb_egap = bb_o->abpos; }
-                        else      { bb_bgap = bb_o->abpos; bb_egap = bb_alen - bb_o->aepos; }
-                        if (bb_s) { bb_bshift = bb_blen - bb_o->bepos; bb_eshift = bb_blen - bb_o->bbpos; }
-                        else      { bb_bshift = bb_o->bbpos; bb_eshift = bb_o->bepos; }
-                        bb_ssum += bb_o->alen;
-                        bb_bsum += (double)(bbrngs[bb_y].beg + bb_bshift - bb_bgap) * bb_o->alen;
-                        bb_esum += (double)(bbrngs[bb_y].beg + bb_eshift + bb_egap) * bb_o->alen;
-                    }
-                    assert(bb_ssum > 0.);
-                    bbrngs[j] = (bb_range_t){j, (int64)(bb_bsum/bb_ssum), (int64)(bb_esum/bb_ssum)};
-                }
-                haps[a].grp  = i+1;
-                haps[a].rev  = bseqs[j] & 1;
-                haps[a].bpos = bbrngs[j].beg;
-                haps[a].epos = bbrngs[j].end;
-            }
-
-            // safety: ensure all bpos >= 0 (recruited seqs may have negative estimates)
-            bpos_min = 0;
-            for (j = 0; j < bnseq; j++) {
-                bp = haps[bseqs[j]>>1].bpos;
-                if (bp < bpos_min) bpos_min = bp;
-            }
-            if (bpos_min < 0) {
-                for (j = 0; j < bnseq; j++) {
-                    haps[bseqs[j]>>1].bpos -= bpos_min;
-                    haps[bseqs[j]>>1].epos -= bpos_min;
-                }
-            }
-
-            // clear smap for this group
-            for (j = 0; j < bnseq; j++)
-                smap_blk[bseqs[j]>>1] = -1;
-        }
-
-        free(bbrngs);
-        free(smap_blk);
-    }
-
-    // QPBO via Graph Cut to orient sequences globally
-    {
-        grp_ovl_t *govls;
-        grp_edge_t *edge;
-        grp_edge_vec_t *gadjs;
-        kvec_t(grp_conflict_t) confs;
-        int64 blk_span, nb, ne;
-        int cur, n_in_tree, new_root, *prim_s, *prim_r, *in_tree;
-        double w, bw, *pathw, *primw;
-        
-        MYCALLOC(govls, novl);
-        n = 0;
-        for (i = 0; i < novl; i++) {
-            ovl = ovls + i;
-            if (ovl->del) continue;
-            a = ovl->aread;
-            b = ovl->bread;
-            ga = abs(grps[a]);
-            gb = abs(grps[b]);
-            if (ga && gb && ga < gb) {
-                govls[n].a = ga;
-                govls[n].b = gb;
-                govls[n].o = ovl;
-                n++;
-            }
-        }
-        qsort(govls, n, sizeof(grp_ovl_t), govl_abseq_cmpfunc);
-
-        if (n > 0) {
-            // add edges between each a-b group pair
-            MYCALLOC(gadjs, ngrp);
-            ga = govls->a;
-            gb = govls->b;
-            for (i = j = 0; i <= n; i++) {
-                if (i == n || govls[i].a != ga || govls[i].b != gb) {
-                    if (ga != gb) {
-                        l_scaled = 0.;
-                        for (k = j; k < i; k++) {
-                            ovl = govls[k].o;
-                            if ((ovl->arev == ovl->brev) == ((grps[ovl->aread] > 0) == (grps[ovl->bread] > 0)))
-                                // support same orientation
-                                l_scaled += 0.5 * (ovl->alen + ovl->blen) * ovl->qual;
-                            else
-                                // support different orientation
-                                l_scaled -= 0.5 * (ovl->alen + ovl->blen) * ovl->qual;
-                        }
-                        if (l_scaled > 0.) {
-                            kv_push(grp_edge_t, gadjs[ga-1], ((grp_edge_t) {gb-1, 0, l_scaled, 0.}));
-                            kv_push(grp_edge_t, gadjs[gb-1], ((grp_edge_t) {ga-1, 0, l_scaled, 0.}));
-                        } else if (l_scaled < 0.) {
-                            kv_push(grp_edge_t, gadjs[ga-1], ((grp_edge_t) {gb-1, 1, -l_scaled, 0.}));
-                            kv_push(grp_edge_t, gadjs[gb-1], ((grp_edge_t) {ga-1, 1, -l_scaled, 0.}));
-                        }
-                    }
-                    if (i < n) {
-                        ga = govls[i].a;
-                        gb = govls[i].b;
-                        j = i;
-                    }
-                }
-            }
-
-            // orient groups using maximum spanning tree (Prim's O(V^2))
-            kv_init(confs);
-            MYMALLOC(label, ngrp);
-            MYMALLOC(pathw, ngrp);
-            MYMALLOC(primw, ngrp);
-            MYMALLOC(prim_s, ngrp);
-            MYCALLOC(prim_r, ngrp);
-            MYCALLOC(in_tree, ngrp);
-            for (i = 0; i < ngrp; i++) {
-                prim_s[i] = -1;
-                primw[i]  = -1.0;
-                pathw[i]  = -1.0;
-                label[i]  = -1;
-            }
-            n_in_tree = 0;
-            while (n_in_tree < ngrp) {
-                // pick max-weight frontier edge, or start a new component
-                bw = -1.0;
-                cur = -1; new_root = -1;
-                for (j = 0; j < ngrp; j++) {
-                    if (in_tree[j]) continue;
-                    if (prim_s[j] < 0) {
-                        if (new_root < 0) new_root = j;
-                    } else if (primw[j] > bw) {
-                        bw = primw[j];
-                        cur = j;
-                    }
-                }
-                if (cur < 0) cur = new_root;
-                // assign label and tree-path bottleneck weight
-                if (prim_s[cur] < 0) {
-                    label[cur] = 0;
-                    pathw[cur] = DBL_MAX;
-                } else {
-                    label[cur] = label[prim_s[cur]] ^ prim_r[cur];
-                    pathw[cur] = MIN(primw[cur], pathw[prim_s[cur]]);
-                }
-                in_tree[cur] = 1;
-                n_in_tree++;
-                // update frontier with neighbors of cur
-                for (j = 0; j < gadjs[cur].n; j++) {
-                    edge = gadjs[cur].a + j;
-                    gb = edge->g;
-                    if (in_tree[gb]) continue;
-                    if (edge->w > primw[gb]) {
-                        primw[gb]  = edge->w;
-                        prim_s[gb] = cur;
-                        prim_r[gb] = edge->r;
-                    }
-                }
-            }
-
-            // detect frustrated non-tree edges (edge_w <= cut_w after MST)
-            for (ga = 0; ga < ngrp; ga++) {
-                for (j = 0; j < gadjs[ga].n; j++) {
-                    edge = gadjs[ga].a + j;
-                    gb = edge->g;
-                    if (ga >= gb) continue;
-                    if ((label[ga] ^ (int)edge->r) != label[gb]) {
-                        w = MIN(pathw[ga], pathw[gb]);
-                        kv_push(grp_conflict_t, confs, ((grp_conflict_t) {ga, gb, edge->w, w}));
-                    }
-                }
-            }
-
-            // flip sequences orientation if necessary
-            // also the sequence order in the block
-            for (i = 0; i < blks.n; i++) {
-                if (label[i] != 1)
-                    continue;
-                blk = blks.a + i;
-                for (j = 0; j < blk->nseq; j++) {
-                    s = blk->seqs[j]>>1;
-                    grps[s] = -grps[s];
-                    blk->seqs[j] ^= 1;
-                }
-                for (j = 0, k = blk->nseq-1; j <= k; j++, k--) {
-                    s = blk->seqs[j];
-                    blk->seqs[j] = blk->seqs[k];
-                    blk->seqs[k] = s;
-                    s = blk->type[j];
-                    blk->type[j] = blk->type[k];
-                    blk->type[k] = s;
-                }
-                // reflect haps[].bpos/epos: new_bpos = max_epos - old_epos
-                blk_span = 0;
-                for (j = 0; j < blk->nseq; j++) {
-                    s = blk->seqs[j]>>1;
-                    if (haps[s].epos > blk_span)
-                        blk_span = haps[s].epos;
-                }
-                for (j = 0; j < blk->nseq; j++) {
-                    s = blk->seqs[j]>>1;
-                    nb = haps[s].bpos;
-                    ne = haps[s].epos;
-                    haps[s].bpos = blk_span - ne;
-                    haps[s].epos = blk_span - nb;
-                    haps[s].rev  = blk->seqs[j] & 1;
-                }
-            }
-
-            kv_destroy(confs);
-            for (i = 0; i < ngrp; i++)
-                kv_destroy(gadjs[i]);
-            free(gadjs);
-            free(label);
-            free(pathw);
-            free(primw);
-            free(prim_s); 
-            free(prim_r); 
-            free(in_tree);
-        }
-        free(govls);
-    }
-    **/
 
     // order sequences within-group
     {
@@ -5091,9 +4717,12 @@ add_block:
             for (j = 0; j < blk->nseq; j++)
                 haps[blk->seqs[j]>>1].grp = i+1;
         }
-        
+
         // order sequences within each group
-        build_haplotype_order(blks.a, ngrp, ovls, index, haps, dicts, NULL);
+        build_haplotype_order(blks.a, blks.n, ovls, index, haps, dicts, ploidy, NULL);
+
+        // fix unassigned sequences (if any)
+        ngrp = fix_haplotype_group(&blks, haps, dicts);
         
         // update grps[] based on the new haplotype order
         for (s = 0; s < nseq; s++)
@@ -5219,8 +4848,11 @@ add_block:
                     continue; // stale entry
 
                 // merge gb into ga
-                unions[gb] = ga;
-                
+                if (ga < gb)
+                    unions[gb] = ga;
+                else
+                    unions[ga] = gb;
+
                 // update sequence profiles
                 olink = gadj->olinks;
                 srngv.n = 0;
@@ -5315,9 +4947,21 @@ add_block:
                 }
             }
 
-            // reorder sequences within merged groups
-            // unions and sords contents are updated in-place
-            ngrp = blks.n = build_haplotype_order_in_merged_groups(blks.a, ngrp, unions, ovls, index, haps, dicts, sords);
+            // rebuild haplotype blocks based on merged groups
+            blks.n = merge_haplotype_groups(blks.a, blks.n, unions, states);
+
+            // reorder sequences within each merged group
+            build_haplotype_order(blks.a, blks.n, ovls, index, haps, dicts, ploidy, states);
+
+            // fix unassigned sequences (if any)
+            ngrp = fix_haplotype_group(&blks, haps, dicts);
+
+            // update haps[].grp based on merged groups
+            for (i = 0; i < blks.n; i++) {
+                blk = blks.a + i;
+                for (j = 0; j < blk->nseq; j++)
+                    haps[blk->seqs[j]>>1].grp = i+1;
+            }
 
             // update grps[] based on the new haplotype order
             for (s = 0; s < nseq; s++)
@@ -5346,7 +4990,7 @@ add_block:
     {
         scf_block_t *new_blks;
         ord_dbl_t *rords;
-        uint32 *bseqs, *btype;
+        uint32 *bseqs;
         grp_edge_vec_t *sadj; // sparse adj: sadj[i] = list of (j, w) with adj_w[i,j]>0
         double w;
         int *grp_order, *grp_rank;
@@ -5362,7 +5006,6 @@ add_block:
         for (i = 0; i < blks.n; i++) {
             blk = blks.a + i;
             bseqs = blk->seqs;
-            btype = blk->type;
             bnseq = blk->nseq;
             for (j = 0; j < bnseq; j++) {
                 qords[j].which = j;
@@ -5372,10 +5015,8 @@ add_block:
             for (j = 0; j < bnseq; j++) {
                 a = qords[j].which;
                 cseqs[j] = bseqs[a];
-                ctype[j] = btype[a];
             }
             memcpy(bseqs, cseqs, bnseq * sizeof(uint32));
-            memcpy(btype, ctype, bnseq * sizeof(uint32));
         }
 
         // make distance matrix between groups
@@ -5784,7 +5425,7 @@ add_block:
         double v, *dp, best;
         int *used_a, *used_b, *chain, chain_n, tmp;
         int a, b, ga, gb, ia, ib, ic, ia2, ib2, cx, prev;
-        int na, nb, np, hi, hj, m, x, y, t, *tb, *hcnt, *unions;
+        int na, nb, np, hi, hj, m, x, y, t, *tb, *hcnt, *unions, *states;
         
         MYCALLOC(hap_bpos, ploidy);
         MYCALLOC(hap_epos, ploidy);
@@ -5995,6 +5636,7 @@ add_block:
             np++;
 
             // do actual merging
+            MYMALLOC(states, ngrp);
             MYMALLOC(unions, ngrp);
             for (i = 0; i < ngrp; i++)
                 unions[i] = -1;
@@ -6012,15 +5654,28 @@ add_block:
                     unions[j] = ga;
             }
 
-            // reorder sequences within merged groups
-            // unions and sords contents are updated in-place
-            ngrp = blks.n = build_haplotype_order_in_merged_groups(blks.a, ngrp, unions, ovls, index, haps, dicts, sords);
+            // rebuild haplotype blocks based on merged groups
+            blks.n = merge_haplotype_groups(blks.a, blks.n, unions, states);
+
+            // reorder sequences within each merged group
+            build_haplotype_order(blks.a, blks.n, ovls, index, haps, dicts, ploidy, states);
+
+            // fix unassigned sequences (if any)
+            ngrp = fix_haplotype_group(&blks, haps, dicts);
+
+            // update haps[].grp based on merged groups
+            for (i = 0; i < blks.n; i++) {
+                blk = blks.a + i;
+                for (j = 0; j < blk->nseq; j++)
+                    haps[blk->seqs[j]>>1].grp = i+1;
+            }
 
             // update grps[] based on the new haplotype order
             for (s = 0; s < nseq; s++)
                 grps[s] = haps[s].rev? -haps[s].grp : (haps[s].grp);
 
             free(unions);
+            free(states);
         }
 
         free(dp); 
@@ -6224,10 +5879,8 @@ add_block:
         }
     }
 
-    for (i = 0; i < blks.n; i++) {
+    for (i = 0; i < blks.n; i++)
         free(blks.a[i].seqs);
-        free(blks.a[i].type);
-    }
     free(blks.a);
     free(covs[0]);
     free(covs);
@@ -6239,7 +5892,6 @@ add_block:
     free(sords);
     free(qords);
     free(cseqs);
-    free(ctype);
     free(rmarks);
     free(qmarks);
     kv_destroy(clus);
@@ -8627,7 +8279,7 @@ static int select_phase_anchors(const phase_blk_ctx_t *ctx,
         ru = rank[gu];
         rv = rank[gv];
 
-        w = hlk->l * HIC_NORM_WINDOW *
+        w = hlk->l * HIC_WINDOW_SIZE *
             ctx->hord[ctx->hls[e]].event / 1000000.0 * PHASE_BETA;
 
         if (ru < right && rv >= right)
@@ -9096,7 +8748,7 @@ static phase_mip_result_t solve_phase_subproblem(const phase_blk_ctx_t *ctx,
     for (e = 0; e < nlh; e++) {
         int ge = lhic[e];
         double w = ctx->hlks[ctx->hls[ge]].l *
-                   HIC_NORM_WINDOW *
+                   HIC_WINDOW_SIZE *
                    ctx->hord[ctx->hls[ge]].event /
                    1000000.0 * PHASE_BETA;
 
@@ -9153,7 +8805,7 @@ static phase_mip_result_t solve_phase_subproblem(const phase_blk_ctx_t *ctx,
         if (hap < 1 || hap > ctx->K)
             continue;  /* future/unresolved external endpoint */
 
-        w = hlk->l * HIC_NORM_WINDOW *
+        w = hlk->l * HIC_WINDOW_SIZE *
             ctx->hord[ctx->hls[e]].event /
             1000000.0 * PHASE_BETA;
 
@@ -9356,7 +9008,7 @@ static phase_roll_result_t hybrid_phase_rolling_solve(void *_data,
 
     (void)tid;
 
-    memset(&ctx, 0, sizeof(ctx));
+    MYBZERO(&ctx, 1);
 
     ctx.data = (phase_data_t *)_data;
     ctx.jid = jid;
@@ -9663,7 +9315,7 @@ static double phase_full_assignment_objective(const phase_blk_ctx_t *ctx,
         if (assign[u] == assign[v] &&
             assign[u] >= 1 && assign[u] <= ctx->K) {
             double w =
-                hlk->l * HIC_NORM_WINDOW *
+                hlk->l * HIC_WINDOW_SIZE *
                 ctx->hord[ctx->hls[e]].event /
                 1000000.0 * PHASE_BETA;
             obj += w;
@@ -10033,7 +9685,7 @@ static phase_mip_result_t hybrid_phase_full_ilp_solve(void *_data,
 
     (void)tid;
 
-    memset(&ctx, 0, sizeof(ctx));
+    MYBZERO(&ctx, 1);
     ctx.data = data;
     ctx.jid = jid;
     ctx.grps = grps;
@@ -10194,7 +9846,7 @@ static phase_mip_result_t hybrid_phase_full_ilp_solve(void *_data,
     Highs_changeObjectiveSense(highs, -1);
 
     for (e = 0; e < nh; e++) {
-        w = hlks[hls[e]].l * HIC_NORM_WINDOW *
+        w = hlks[hls[e]].l * HIC_WINDOW_SIZE *
             hord[hls[e]].event / 1000000.0 * PHASE_BETA;
 
         for (k = 0; k < K; k++)
@@ -10581,9 +10233,9 @@ typedef struct {
 } phase_heu_conf_t;
 
 
-static uint64_t phase_heu_rng_next(uint64_t *s)
+static uint64 phase_heu_rng_next(uint64 *s)
 {
-    uint64_t x = *s;
+    uint64 x = *s;
     if (x == 0) x = UINT64_C(0x9e3779b97f4a7c15);
     x ^= x >> 12;
     x ^= x << 25;
@@ -10592,16 +10244,16 @@ static uint64_t phase_heu_rng_next(uint64_t *s)
     return x * UINT64_C(2685821657736338717);
 }
 
-static double phase_heu_rng01(uint64_t *s)
+static double phase_heu_rng01(uint64 *s)
 {
     return (phase_heu_rng_next(s) >> 11) *
            (1.0 / 9007199254740992.0);
 }
 
-static int phase_heu_rand_int(uint64_t *s, int n)
+static int phase_heu_rand_int(uint64 *s, int n)
 {
     return n <= 1 ? 0 :
-        (int)(phase_heu_rng_next(s) % (uint64_t)n);
+        (int)(phase_heu_rng_next(s) % (uint64)n);
 }
 
 static void phase_heu_graph_destroy(phase_heu_graph_t *g)
@@ -10610,7 +10262,7 @@ static void phase_heu_graph_destroy(phase_heu_graph_t *g)
     free(g->arc);
     free(g->head);
     free(g->abs_degree);
-    memset(g, 0, sizeof(*g));
+    MYBZERO(g, 1);
 }
 
 static void phase_heu_graph_add(phase_heu_graph_t *g,
@@ -10655,7 +10307,7 @@ static int phase_heu_graph_build(phase_heu_graph_t *g,
     int e, u, v;
     double w;
 
-    memset(g, 0, sizeof(*g));
+    MYBZERO(g, 1);
     g->ns = ns;
     g->K = data->K;
 
@@ -10677,7 +10329,7 @@ static int phase_heu_graph_build(phase_heu_graph_t *g,
         hlk_t *h = hlks + hls[e];
         u = sidx[h->a];
         v = sidx[h->b];
-        w = h->l * HIC_NORM_WINDOW *
+        w = h->l * HIC_WINDOW_SIZE *
             hord[hls[e]].event / 1000000.0 * PHASE_BETA;
         phase_heu_graph_add(g, u, v, +w);
     }
@@ -10717,7 +10369,7 @@ static void phase_heu_build_scores(const phase_heu_graph_t *g,
 {
     int i, a;
 
-    memset(score, 0, (size_t)g->ns * g->K * sizeof(*score));
+    MYBZERO(score, (size_t) g->ns * g->K);
 
     for (i = 0; i < g->ns; ++i) {
         for (a = g->head[i]; a >= 0; a = g->arc[a].next) {
@@ -10743,7 +10395,7 @@ static int phase_heu_make_seeds(phase_data_t *data, long jid,
     int nsedges = 0, clique_size = 0;
     int i, k, target;
 
-    memset(fixed, 0, (size_t)ns * sizeof(*fixed));
+    MYBZERO(fixed, ns);
     for (i = 0; i < ns; ++i) seed_hap[i] = -1;
 
     if (no > 0) {
@@ -10776,14 +10428,14 @@ static int phase_heu_make_seeds(phase_data_t *data, long jid,
                 int b = (int)clique[k];
                 clique[k] =
                     ((uint64)haps[gseq[b]].len << 32) |
-                    (uint64)(uint32_t)b;
+                    (uint64)(uint32)b;
             }
 
             qsort(clique, (size_t)clique_size, sizeof(*clique),
                   u64_dcmp_func);
 
             for (k = 0; k < clique_size; ++k) {
-                int b = (int)(uint32_t)clique[k];
+                int b = (int)(uint32)clique[k];
                 fixed[b] = 1;
                 seed_hap[b] = k;
             }
@@ -10878,7 +10530,7 @@ static int phase_heu_align_to_seeds(int ns, int K, int *hap,
 }
 
 static int phase_heu_choose_hap(const double *s, int K, double conn,
-                                int randomized, uint64_t *rng)
+                                int randomized, uint64 *rng)
 {
     int k, bestk = 0;
     double best = s[0];
@@ -10910,7 +10562,7 @@ static int phase_heu_choose_hap(const double *s, int K, double conn,
 static int phase_heu_greedy(const phase_heu_graph_t *g,
                             const unsigned char *fixed,
                             const int *seed_hap,
-                            int randomized, uint64_t *rng,
+                            int randomized, uint64 *rng,
                             int *hap)
 {
     double *score =
@@ -11090,7 +10742,7 @@ static int phase_heu_perturb(const phase_heu_graph_t *g,
                              const unsigned char *fixed,
                              int *hap, double *score,
                              phase_heu_conf_t *conf,
-                             uint64_t *rng)
+                             uint64 *rng)
 {
     int i, k, q, nfree = 0;
     int npert, pool;
@@ -11207,7 +10859,7 @@ static int phase_heu_solve(phase_data_t *data, long jid,
     double global_obj = -DBL_MAX;
     int ns = data->ns[jid], K = data->K;
     int nseed, restart, have_incoming;
-    uint64_t base_rng;
+    uint64 base_rng;
 
     if (ns <= 0 || K <= 0) return 0;
     if (!phase_heu_graph_build(&g, data, jid)) return 0;
@@ -11268,11 +10920,11 @@ static int phase_heu_solve(phase_data_t *data, long jid,
     }
 
     base_rng = UINT64_C(0x6a09e667f3bcc909) ^
-        ((uint64_t)(jid + 1) * UINT64_C(0x9e3779b97f4a7c15));
+        ((uint64)(jid + 1) * UINT64_C(0x9e3779b97f4a7c15));
 
     for (restart = 0; restart < PHASE_HEU_NSTART; ++restart) {
-        uint64_t rng = base_rng ^
-            ((uint64_t)(restart + 1) * UINT64_C(0xbf58476d1ce4e5b9));
+        uint64 rng = base_rng ^
+            ((uint64)(restart + 1) * UINT64_C(0xbf58476d1ce4e5b9));
         double robj;
         int nm = 0, round;
 
@@ -11688,7 +11340,7 @@ static void build_haplotype_partition_hybrid_core(ovl_t *ovls, int64 novl, hlk_t
         mem_alloc_error("haplotype partition offsets");
     cft = cfts;
     for (i = 0, hlk = hlks; i < nhlk; i++, hlk++)
-        *(cft++) = (hcft_t) { hlk->a, hlk->b, (int64) (hlk->l * HIC_NORM_WINDOW * hord[i].event) << 8 | CFT_HIC };
+        *(cft++) = (hcft_t) { hlk->a, hlk->b, (int64) (hlk->l * HIC_WINDOW_SIZE * hord[i].event) << 8 | CFT_HIC };
     for (i = 0, ovl = ovls; i < novl; i++, ovl++) {
         if (ovl->del) continue;
         *(cft++) = (hcft_t) { (int)ovl->aread, (int)ovl->bread, (int64) (ovl->alen + ovl->blen) << 8 |  CFT_OVL };
@@ -11771,7 +11423,7 @@ static void build_haplotype_partition_hybrid_core(ovl_t *ovls, int64 novl, hlk_t
      * The weights follow the sequence-level MILP objective (without the
      * common 1e6 scaling, which does not affect the optimum):
      *
-     *      w_H = l * HIC_NORM_WINDOW * event * PHASE_BETA
+     *      w_H = l * HIC_WINDOW_SIZE * event * PHASE_BETA
      *      w_O = (alen + blen) * log10(alen + blen) * PHASE_ALPHA
      *
      * Each physical cross-group edge is inserted in both directions so
@@ -11836,7 +11488,7 @@ static void build_haplotype_partition_hybrid_core(ovl_t *ovls, int64 novl, hlk_t
             ga = ((haps[a].grp - 1) << 8) | (haps[a].hap - 1);
             gb = ((haps[b].grp - 1) << 8) | (haps[b].hap - 1);
 
-            dw = hlk->l * HIC_NORM_WINDOW * hord[i].event * PHASE_BETA;
+            dw = hlk->l * HIC_WINDOW_SIZE * hord[i].event * PHASE_BETA;
             iw = (int64) llround(dw);
             if (iw == 0 && dw > 0.0)
                 iw = 1;
@@ -12484,7 +12136,7 @@ static void build_haplotype_partition_hybrid_core1(ovl_t *ovls, int64 novl, hlk_
         mem_alloc_error("haplotype partition offsets");
     cft = cfts;
     for (i = 0, hlk = hlks; i < nhlk; i++, hlk++)
-        *(cft++) = (hcft_t) { hlk->a, hlk->b, (int64) (hlk->l * HIC_NORM_WINDOW * hord[i].event) << 8 | CFT_HIC };
+        *(cft++) = (hcft_t) { hlk->a, hlk->b, (int64) (hlk->l * HIC_WINDOW_SIZE * hord[i].event) << 8 | CFT_HIC };
     for (i = 0, ovl = ovls; i < novl; i++, ovl++) {
         if (ovl->del) continue;
         *(cft++) = (hcft_t) { (int)ovl->aread, (int)ovl->bread, (int64) (ovl->alen + ovl->blen) << 8 |  CFT_OVL };
@@ -13220,7 +12872,7 @@ cleanup:
     kv_destroy(vars);
 }
 
-static void write_yahs_outputs(char *hic_bfile, hap_info_t *haps, int64 nseq, int ploidy, sdict_t *dicts, asm_dict_t *break_dict, char *out_pref)
+static void write_yahs_outputs(char *hic_bfile, hap_info_t *haps, sdict_t *dicts, asm_dict_t *break_dict, char *out_pref)
 {
     if (!hic_bfile) return;
     
@@ -13228,13 +12880,16 @@ static void write_yahs_outputs(char *hic_bfile, hap_info_t *haps, int64 nseq, in
     hap_info_t *hseq, *hseqs;
     sdict_t *bdicts;
     sd_seg_t *cseg;
-    int64 nscf, *pos, **ends;
+    int64 nseq, nscf, *pos, **ends;
     int32 *seg, *seq, *nend, **segs, **seqs;
     FILE *fp1, *fp2, *fp3;
     char *sbuff;
     int64 a, b, e, s, n, m, l, t, r, g, nbsq, slen;
     int i, j, k;
     
+    // number of sequences
+    nseq = dicts->n;
+
     // find backbone sequence to build a pseudo-scaffold for each block
     // then build a map sequences to the backone position
     MYMALLOC(hseqs, nseq);
@@ -13475,12 +13130,37 @@ scf_t *build_pseudo_scaffolds(ovl_t *ovls, int64 novl, sdict_t *dicts, asm_dict_
     if (haps == NULL)
         mem_alloc_error("haplotype partition array");
     for (i = 0; i < nseq; i++) {
-        haps[i].seq = i;
-        haps[i].len = dicts->s[i].len;
+        haps[i].seq  = i;
+        haps[i].len  = dicts->s[i].len;
+        haps[i].epos = haps[i].len;
     }
 
     // build haplotype partition using overlaps only
     build_haplotype_partition_overlap(ovls, novl, haps, dicts, ploidy);
+
+#ifdef DEBUG_HAPLOTYPE_LINKAGE
+    for (i = 0; i < dicts->n; i++)
+        fprintf(stdout, "S\t%s\t%d\t%hu\t%d\n", dicts->s[i].name, dicts->s[i].len, haps[i].hap, haps[i].grp);
+    for (i = 0; i < novl; i++) {
+        ovl_t *ovl = ovls + i;
+        int j, nfrag = ovl->nfrag;
+        fprintf(stdout, "O\t%s\t%d\t%d\t%s\t%d\t%d\t%c\n", 
+            dicts->s[ovl->aread].name, ovl->abpos, ovl->aepos, 
+            dicts->s[ovl->bread].name, ovl->bbpos, ovl->bepos,
+            "+-"[ovl->arev != ovl->brev]);
+        for (j = 0; j < nfrag; j++) {
+            ovl_frag_t *frg = ovl->frags + j;
+            fprintf(stdout, "F\t%s\t%d\t%d\t%s\t%d\t%d\t%c\n", 
+                dicts->s[ovl->aread].name, frg->abpos, frg->aepos, 
+                dicts->s[ovl->bread].name, frg->bbpos, frg->bepos,
+                "+-"[frg->rev]);
+        }
+    }
+    for (i = 0; i < nhlk; i++) {
+        hlk_t *hlk = hlks + i;
+        fprintf(stdout, "H\t%s\t%s\t%.1f\n", dicts->s[hlk->a].name, dicts->s[hlk->b].name, hlk->v);
+    }
+#endif
 
     // build scaffold blocks
     build_scaffold_partition(ovls, novl, haps, dicts, buscos, ploidy, min_ext);
@@ -13495,7 +13175,7 @@ scf_t *build_pseudo_scaffolds(ovl_t *ovls, int64 novl, sdict_t *dicts, asm_dict_
 
     // write outputs for yahs
     if (conf_yahs)
-        write_yahs_outputs(hic_bfile, haps, nseq, ploidy, dicts, break_dict, out_pref);
+        write_yahs_outputs(hic_bfile, haps, dicts, break_dict, out_pref);
 
     // build data structure for return
     kv_init(scfs);

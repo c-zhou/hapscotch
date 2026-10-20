@@ -96,6 +96,7 @@ static ko_longopt_t long_options[] = {
     { "min-quality",    ko_required_argument, 'q' },
     { "busco-table",    ko_required_argument, 'g' },
     { "config-yahs",    ko_no_argument,       'Y' },
+    { "hic-window",     ko_required_argument, 'w' },
     { "verbose",        ko_required_argument, 'v' },
     { "version",        ko_no_argument,       'V' },
     { "help",           ko_no_argument,       'h' },
@@ -117,7 +118,7 @@ static inline int yes_or_no(int long_idx, const char *arg)
 
 int main(int argc, char *argv[])
 { 
-    const char *opt_str = "a:c:DYB:Ep:P:t:l:g:o:v:Vh";
+    const char *opt_str = "a:c:DYB:Ep:P:q:t:l:g:w:o:v:Vh";
     ketopt_t opt = KETOPT_INIT;
     int c, long_help = 0, ret = 0;
     int n_threads;
@@ -170,6 +171,7 @@ int main(int argc, char *argv[])
         else if (c == 'P') MAX_PLOIDY_NUMBER = atoi(opt.arg);
         else if (c == 'Y') conf_yahs = 1;
         else if (c == 't') n_threads = atoi(opt.arg);
+        else if (c == 'w') set_hic_window(atoi(opt.arg));
         else if (c == 'o') pref_out = opt.arg;
         else if (c == 301) read_len = atoi(opt.arg);
         else if (c == 302) {
@@ -246,6 +248,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "      --file-type   STR    input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
         fprintf(fp_help, "      --read-length INT    read length (required for PA5 format input) [%d]\n", read_len);
         fprintf(fp_help, "      --min-quality INT    minimum mapping quality of reads used for phasing [%d]\n", min_qual);
+        fprintf(fp_help, "    -w INT                 window size for counting hic links [%d]\n", HIC_WINDOW_SIZE);
         fprintf(fp_help, "    -t INT                 maximum number of threads to use [%d]\n", n_threads);
         fprintf(fp_help, "    -o STR                 string prefix of output files [%s]\n", pref_out);
         if (long_help) {
@@ -357,27 +360,6 @@ int main(int argc, char *argv[])
     ovls = add_dual_overlaps(ovls, novl, &novl);
     qsort(ovls, novl, sizeof(ovl_t), ovl_abseqs_cmpfunc);
 
-#ifdef DEBUG_PRINT_OVERLAP
-    for (i = 0; i < dicts->n; i++)
-        printf("S\t%s\t%d\n", dicts->s[i].name, dicts->s[i].len);
-    for (i = 0; i < novl; i++) {
-        ovl_t *ovl = ovls + i;
-        int j, nfrag = ovl->nfrag;
-        printf("O\t%s\t%d\t%d\t%s\t%d\t%d\t%c\t%.3f\t%.3f\t%.3f\n", 
-            dicts->s[ovl->aread].name, ovl->abpos, ovl->aepos, 
-            dicts->s[ovl->bread].name, ovl->bbpos, ovl->bepos,
-            "+-"[ovl->arev != ovl->brev],
-            ovl->neff, ovl->score, ovl->qual);
-        for (j = 0; j < nfrag; j++) {
-            ovl_frag_t *frg = ovl->frags + j;
-            printf("F\t%s\t%d\t%d\t%s\t%d\t%d\t%c\n", 
-                dicts->s[ovl->aread].name, frg->abpos, frg->aepos, 
-                dicts->s[ovl->bread].name, frg->bbpos, frg->bepos,
-                "+-"[frg->rev]);
-        }
-    }
-#endif
-
     // estimate ploidy number if not specified
     if (!ploidy_num) {
         ploidy_num = estimate_ploidy_number(ovls, novl, dicts);
@@ -395,9 +377,6 @@ int main(int argc, char *argv[])
         }
     }
     write_ploidy_file(ploidy_num, pref_out);
-
-    // detect structure variants or misassemblies
-    //detect_structural_variants(ovls, novl, dicts, ploidy_num);
 
     // build pseudo scaffolds
     nscf = 0;

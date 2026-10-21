@@ -3460,7 +3460,7 @@ static int ho_cmp_cand(const void *p, const void *q)
 
 /* Sweep: every candidate is applied, scored and undone.  The qualifying ones (gain >= HO_INV_MINGAIN, unused weight not rising) are
  * then tried in order of gain against the current layout and kept if they still qualify; a new sweep follows if anything was kept. */
-static void ho_invfix(ho_ctx_t *M)
+static ho_sc_t ho_invfix(ho_ctx_t *M)
 {
     int ns = M->ns, sw, nrg, nmv, nq, i, op, n, nacc, *buf;
     uint64 mask;
@@ -3472,7 +3472,8 @@ static void ho_invfix(ho_ctx_t *M)
     ho_ord_t O;
     ho_pcv_t P;
     ho_an_t A;
-    if (M->ploidy < 2) return;
+    ho_sc_t fin = {0, 0, 0, 0, 0};
+    if (M->ploidy < 2) return fin;
     MYBZERO(&A, 1); kv_init(P); kv_init(Q);
     MYMALLOC(bpos, ns); MYMALLOC(brev, ns); MYMALLOC(chg, ns); MYMALLOC(wr, ns + 1); MYMALLOC(wh, ns + 1); MYMALLOC(buf, 2 * (ns + M->ploidy) + 2);
     MYMALLOC(O.o, ns + 1); MYMALLOC(O.off, M->ploidy + 3); MYMALLOC(O.rk, ns + 1);
@@ -3511,8 +3512,10 @@ static void ho_invfix(ho_ctx_t *M)
         }
         if (nacc == 0) break;
     }
+    fin = A.sc;
     ho_an_destroy(&A); kv_destroy(P); kv_destroy(Q);
     free(rg); free(mv); free(bpos); free(brev); free(chg); free(wr); free(wh); free(buf); free(O.o); free(O.off); free(O.rk);
+    return fin;
 }
 
 /* Lay out the current group (M->ns sequences, evidence already built) */
@@ -3532,8 +3535,15 @@ static void ho_invfix(ho_ctx_t *M)
  *    alone are symmetric).  The pair of clusters with the best group score is merged (the smaller cluster is moved into the frame of
  *    the larger one), repeatedly, while a positive score is left.  The overlap is computed from per-cluster, per-haplotype lists of
  *    the sequences sorted by position, kept up to date on every merge.
+ *  - Deferral (strategy option "defer"): a sequence with readings on both strands of HO_INV_MINW or more with one partner holds an
+ *    inversion of its own or faces one; its readings would carry a wrong orientation from one block to the next, so they take part
+ *    only in a second merging round, after the clusters the other readings support have been formed.
  *  - Clusters still apart are then joined to the largest one by their best-supported map, largest first, regardless of overlap
  *    (the overlap removal below resolves it).
+ *  - Flips (strategy option "flip", ho_sync_retry): the merges form a tree; every block of it (what one merge moved in) is taken
+ *    out of the frame and put back mirrored by its best mirrored map, and kept there if the layout objective (weight of the
+ *    satisfied readings, an inversion in place counting 1 - HO_INV_REVCOST, minus HO_SYNC_PEN x same-haplotype overlap) rises by
+ *    HO_INV_MINGAIN; repeated until nothing flips.  This undoes a mirror that the greedy merging fixed early on weak evidence.
  *  - Refinement: every sequence takes the heaviest group of the (strand, offset) proposals of all its readings within its cluster,
  *    repeatedly, until nothing moves; the longest sequence is then made forward.  Here proposals agree when their alignments line up
  *    (no crossing test: the neighbours' positions are provisional, sequences of a haplotype still overlap before unpile/project). */
@@ -3555,6 +3565,8 @@ typedef struct {
     double *clen;
     ho_ivv_t *iv;                           /* per cluster and haplotype (c * (ploidy + 1) + h): its sequences sorted by position */
     double *ivmax;                          /* ... and the longest of them */
+    uint8 *amb; int phase;                  /* reading deferred to the second merging round; current round (1, 2) */
+    int *nd;                                /* merge-tree node of each cluster (leaves: the sequences) */
 } ho_sync_t;
 
 static const double *ho_pref;
@@ -3705,7 +3717,7 @@ static double ho_sync_overlap(const ho_ctx_t *M, const ho_sync_t *S, int A, int 
 static int ho_sync_free(const ho_ctx_t *M, const ho_sync_t *S, int A, const double *ap, int B, int j, int m, double t1, double t2)
 {
     int pl = M->ploidy + 1, b = B >= 0 ? S->head[B] : j;
-    if (A < 0) return 1;
+    if (A < 0 || !ap) return 1;
     for (; b >= 0; b = B >= 0 ? S->next[b] : -1) {
         int h = M->hap[b], lo, hi, k, na;
         const int *la;
@@ -3787,7 +3799,7 @@ static int ho_sync_choose(const ho_ctx_t *M, ho_sync_t *S, int A, int B, double 
             int k = S->radj[i], o = S->R.a[k].a == b ? S->R.a[k].b : S->R.a[k].a;
             double c;
             ho_pr_t p;
-            if (S->cl[o] != A) continue;
+            if (S->cl[o] != A || (S->phase == 1 && S->amb[k])) continue;
             c = ho_sync_prop(M, S, k, b, &s);
             p.m = s ^ M->rev[b]; p.t = p.m ? c + M->pos[b] + M->slen[b] : c - M->pos[b]; p.w = S->R.a[k].w; p.sl = S->R.a[k].sl;
             kv_push(ho_pr_t, S->P, p);
@@ -3872,51 +3884,338 @@ static int ho_cmp_strength(const void *p, const void *q)
     return (a > b) - (a < b);
 }
 
-static void ho_sync(ho_ctx_t *M)
+/* weight reading k counts for in the current layout: its weight if the layout satisfies it (relative strand, offset within the slack);
+ * a reading of the other strand counts 1 - HO_INV_REVCOST of it if it is an inversion in place (its middle maps onto itself), as in
+ * the inversion score; 0 otherwise */
+static double ho_sync_sat(const ho_ctx_t *M, ho_sync_t *S, int k)
 {
-    int ns = M->ns, i, k, n, rnd, big, *adj;
+    const ho_rd_t *d = &S->R.a[k];
+    int s, f;
+    double c = ho_sync_prop(M, S, k, d->b, &s), ca = 0, cb = 0, tw = 0;
+    if (s == M->rev[d->b]) return fabs(c - M->pos[d->b]) <= d->sl ? d->w : 0;
+    for (f = d->f0; f < d->f0 + d->nf; f++) { ca += S->F.a[f].w * S->F.a[f].pa; cb += S->F.a[f].w * S->F.a[f].pb; tw += S->F.a[f].w; }
+    return tw > 0 && fabs(ho_lc(M, d->a, ca / tw) - ho_lc(M, d->b, cb / tw)) <= d->sl ? (1 - HO_INV_REVCOST) * d->w : 0;
+}
+
+/* the part of the layout objective (satisfied reading weight - HO_SYNC_PEN x same-haplotype overlap) that depends on where cluster F
+ * lies relative to cluster A: the readings between them and the overlap between them */
+static double ho_sync_part(const ho_ctx_t *M, ho_sync_t *S, int A, int F)
+{
+    int b, i;
+    double w = 0;
+    for (b = S->head[F]; b >= 0; b = S->next[b])
+        for (i = S->roff[b]; i < S->roff[b + 1]; i++) {
+            int k = S->radj[i], o = S->R.a[k].a == b ? S->R.a[k].b : S->R.a[k].a;
+            if (S->cl[o] == A) w += ho_sync_sat(M, S, k);
+        }
+    return w - HO_SYNC_PEN * ho_sync_overlap(M, S, A, F, 0, 0);
+}
+
+/* best map of cluster F into A's frame among the mirrored ones, *t its shift; proposals agree when their alignments line up (no
+ * crossing test, as in the refinement); returns 0 if no reading proposes a mirrored map */
+static int ho_sync_mirrored(const ho_ctx_t *M, ho_sync_t *S, int A, int F, double *t)
+{
+    int b, i, s, m;
+    double sc;
+    S->P.n = 0;
+    for (b = S->head[F]; b >= 0; b = S->next[b])
+        for (i = S->roff[b]; i < S->roff[b + 1]; i++) {
+            int k = S->radj[i], o = S->R.a[k].a == b ? S->R.a[k].b : S->R.a[k].a;
+            double c;
+            ho_pr_t p;
+            if (S->cl[o] != A) continue;
+            c = ho_sync_prop(M, S, k, b, &s);
+            p.m = s ^ M->rev[b];
+            if (!p.m) continue;
+            p.t = c + M->pos[b] + M->slen[b]; p.w = S->R.a[k].w; p.sl = S->R.a[k].sl;
+            kv_push(ho_pr_t, S->P, p);
+        }
+    if (S->P.n == 0) return 0;
+    ho_sync_best(M, S, A, NULL, F, -1, HO_SYNC_PEN, &m, t, &sc);
+    return 1;
+}
+
+/* moves the sequences mem[0 .. nm) out of cluster big into the free cluster F (lists, haplotype lists, lengths); in[]: scratch */
+static void ho_sync_detach(const ho_ctx_t *M, ho_sync_t *S, int big, int F, const int *mem, int nm, uint8 *in)
+{
+    int b, h, i, prev, pl = M->ploidy + 1;
+    for (i = 0; i < nm; i++) in[mem[i]] = 1;
+    for (prev = -1, b = S->head[big]; b >= 0; b = S->next[b]) {
+        if (in[b]) continue;
+        if (prev < 0) S->head[big] = b; else S->next[prev] = b;
+        prev = b;
+    }
+    S->next[prev] = -1; S->tail[big] = prev;
+    for (h = 1; h < pl; h++) {
+        ho_ivv_t *va = &S->iv[big * pl + h];
+        size_t j, k;
+        for (j = k = 0; j < va->n; j++) if (!in[va->a[j]]) va->a[k++] = va->a[j];
+        va->n = k;
+        S->ivmax[F * pl + h] = 0;
+    }
+    S->head[F] = mem[0]; S->tail[F] = mem[nm - 1]; S->clen[F] = 0;
+    for (i = 0; i < nm; i++) {
+        b = mem[i]; in[b] = 0;
+        S->next[b] = i + 1 < nm ? mem[i + 1] : -1; S->cl[b] = F; S->clen[F] += M->slen[b]; S->clen[big] -= M->slen[b];
+        if (M->hap[b] >= 1 && M->hap[b] < pl) { kv_push(int, S->iv[F * pl + M->hap[b]], b); S->ivmax[F * pl + M->hap[b]] = MAX(S->ivmax[F * pl + M->hap[b]], M->slen[b]); }
+    }
+    for (h = 1; h < pl; h++) { ho_pref = M->pos; qsort(S->iv[F * pl + h].a, S->iv[F * pl + h].n, sizeof(int), ho_cmp_pos); }
+}
+
+/* one sweep of flips over the merge tree of cluster big (node v < ns: sequence v; v >= ns: merge v - ns joining ch[2(v - ns)] and
+ * ch[2(v - ns) + 1]), latest merges first: each block is detached, tried mirrored at its best mirrored map, kept there if the part of
+ * the objective that depends on it (ho_sync_part) rises by HO_INV_MINGAIN, and joined back.  Returns the number of blocks flipped. */
+static int ho_sync_retry(ho_ctx_t *M, ho_sync_t *S, int big, const int *ch, int nn, int *stk, int *mem, uint8 *in, double *sp, uint8 *sr)
+{
+    int v, nflip = 0, ns = M->ns;
+    for (v = nn - 1; v >= 0; v--) {
+        int nm = 0, top = 0, F, i, b;
+        double p0, p1, t = 0;
+        if (v == S->nd[big]) continue;
+        stk[top++] = v;                                             /* the block's sequences */
+        while (top) { int u = stk[--top]; if (u < ns) mem[nm++] = u; else { stk[top++] = ch[2 * (u - ns)]; stk[top++] = ch[2 * (u - ns) + 1]; } }
+        if (S->cl[mem[0]] != big) continue;
+        for (i = 0; i < nm; i++) in[mem[i]] = 1;
+        for (b = S->head[big]; b >= 0 && in[b]; b = S->next[b]);  /* a sequence left outside the block */
+        for (i = 0; i < nm; i++) in[mem[i]] = 0;
+        if (b < 0) continue;
+        for (F = 0; F < ns && (S->head[F] >= 0 || F == big); F++);  /* a free cluster id */
+        if (F == ns) break;
+        ho_sync_detach(M, S, big, F, mem, nm, in);
+        p0 = ho_sync_part(M, S, big, F);
+        if (ho_sync_mirrored(M, S, big, F, &t)) {
+            for (i = 0; i < nm; i++) { b = mem[i]; sp[i] = M->pos[b]; sr[i] = M->rev[b]; M->rev[b] ^= 1; M->pos[b] = t - M->pos[b] - M->slen[b]; }
+            p1 = ho_sync_part(M, S, big, F);
+            if (p1 - p0 >= HO_INV_MINGAIN) { 
+                nflip++; 
+            } else for (i = 0; i < nm; i++) { M->pos[mem[i]] = sp[i]; M->rev[mem[i]] = sr[i]; }
+        }
+        ho_sync_merge(M, S, big, F, 0, 0);
+    }
+    return nflip;
+}
+
+/* global strategy: strands and offsets of all sequences at once instead of by greedy merging (after hap_order v14).
+ *  - Strands: per pair, the reading weight on each relative strand; a maximum spanning forest of the pairs (by total weight) gives the
+ *    relative strands, each tree oriented from its longest sequence; then single sequences are flipped, best gain first, while the
+ *    weight of the readings that agree with the strands rises.
+ *  - Offsets: every reading that agrees with the strands is an equation  x_b - x_a = d  (d: its offset, weighted median of its fragments)
+ *    of weight w; the weighted least-squares solution is found by conjugate gradients on the normal equations (a weighted graph
+ *    Laplacian; HO_GLOB_EPS fixes the free translation of each component), re-weighted HO_GLOB_IRLS times with the Cauchy weight
+ *    1 / (1 + (r / c)^2) of the residual r, c = the junction allowance ho_mg of the reading's aligned length (a repeat or a wrong
+ *    reading loses its pull instead of bending the layout).
+ *  - The sequences joined by agreeing readings form the clusters (the largest is the backbone, as after merging). */
+#define HO_GLOB_IRLS 10           /* re-weighting rounds */
+#define HO_GLOB_CG   2000         /* conjugate-gradient iterations per round (at most) */
+#define HO_GLOB_EPS  1e-9         /* diagonal regularisation, relative to the largest diagonal entry */
+
+static int ho_find_root(int *par, int x) { while (par[x] != x) { par[x] = par[par[x]]; x = par[x]; } return x; }
+
+typedef struct { int a, b; double w0, w1; } ho_gp_t;                    /* pair: reading weight on the same / opposite strand */
+static int ho_cmp_gp(const void *p, const void *q)
+{
+    const ho_gp_t *x = p, *y = q;
+    double tx = x->w0 + x->w1, ty = y->w0 + y->w1;
+    if (tx != ty) return tx > ty ? -1 : 1;
+    if (x->a != y->a) return x->a - y->a;
+    return x->b - y->b;
+}
+
+/* flip gain of sequence u: agreeing pair weight after flipping u minus before */
+static double ho_glob_gain(const ho_ctx_t *M, int u, const int *off, const int *adj, const ho_gp_t *gp)
+{
+    int i;
+    double g = 0;
+    for (i = off[u]; i < off[u + 1]; i++) {
+        const ho_gp_t *e = &gp[adj[i]];
+        int rel = M->rev[e->a] ^ M->rev[e->b];
+        g += rel ? e->w0 - e->w1 : e->w1 - e->w0;
+    }
+    return g;
+}
+
+/* out = (Laplacian of the weighted equations + diagonal) v; dg: its diagonal */
+static void ho_glob_mul(int ns, int nrow, const double *dg, const int *ra, const int *rb, const double *qw, const double *wt, const double *v, double *out)
+{
+    int i, k;
+    for (i = 0; i < ns; i++) out[i] = dg[i] * v[i];
+    for (k = 0; k < nrow; k++) { double w = qw[k] * wt[k]; out[ra[k]] -= w * v[rb[k]]; out[rb[k]] -= w * v[ra[k]]; }
+}
+
+static void ho_sync_global(ho_ctx_t *M, ho_sync_t *S)
+{
+    int ns = M->ns, nr = (int) S->R.n, np = 0, i, k, it, *off, *adj, *par, *q, *head, *nxt, *to, *ne, nt = 0, nrow = 0;
+    ho_gp_t *gp;
+    double *dg, *rhs, *x, *r, *p, *Ap, *d, *qw, *wt, *cs;
+    int *ra, *rb;
+    uint8 *seen;
+    MYMALLOC(gp, nr + 1); MYMALLOC(off, ns + 2); MYMALLOC(adj, 2 * nr + ns + 2); MYMALLOC(par, ns); MYMALLOC(q, ns + 1);
+    MYMALLOC(head, ns); MYMALLOC(nxt, 2 * ns + 2); MYMALLOC(to, 2 * ns + 2); MYMALLOC(ne, 2 * ns + 2); seen = calloc(ns + 1, 1);
+    MYMALLOC(dg, ns); MYMALLOC(rhs, ns); MYMALLOC(x, ns); MYMALLOC(r, ns); MYMALLOC(p, ns); MYMALLOC(Ap, ns);
+    MYMALLOC(d, nr + 1); MYMALLOC(qw, nr + 1); MYMALLOC(wt, nr + 1); MYMALLOC(ra, nr + 1); MYMALLOC(rb, nr + 1); MYMALLOC(cs, nr + 1);
+    if (!gp || !off || !adj || !par || !q || !head || !nxt || !to || !ne || !seen || !dg || !rhs || !x || !r || !p || !Ap || !d || !qw || !wt || !ra || !rb || !cs)
+        mem_alloc_error("hap order array");
+    for (k = 0; k < nr; k++) {                                      /* pairs (the readings of a pair are consecutive) */
+        const ho_rd_t *e = &S->R.a[k];
+        if (!(np > 0 && gp[np - 1].a == e->a && gp[np - 1].b == e->b)) { gp[np].a = e->a; gp[np].b = e->b; gp[np].w0 = gp[np].w1 = 0; np++; }
+        if (e->rel) gp[np - 1].w1 += e->w; else gp[np - 1].w0 += e->w;
+    }
+    qsort(gp, np, sizeof(ho_gp_t), ho_cmp_gp);
+    for (i = 0; i < ns; i++) { par[i] = i; head[i] = -1; M->rev[i] = 0; M->pos[i] = 0; }
+    for (k = 0; k < np; k++) {                                      /* maximum spanning forest */
+        int u = ho_find_root(par, gp[k].a), v = ho_find_root(par, gp[k].b), rel = gp[k].w1 > gp[k].w0;
+        if (u == v) continue;
+        par[u] = v;
+        to[nt] = gp[k].b; ne[nt] = rel; nxt[nt] = head[gp[k].a]; head[gp[k].a] = nt++;
+        to[nt] = gp[k].a; ne[nt] = rel; nxt[nt] = head[gp[k].b]; head[gp[k].b] = nt++;
+    }
+    for (i = 0; i < ns; i++) q[i] = i;
+    ho_len_ref = M->slen; qsort(q, ns, sizeof(int), ho_cmp_len_desc);
+    for (i = 0; i < ns; i++) {                                      /* strands along the trees, from the longest sequence */
+        int qh = 0, qt = 0, st = q[i];
+        if (seen[st]) continue;
+        seen[st] = 1; M->rev[st] = 0; adj[qt++] = st;               /* (adj: the BFS queue here) */
+        while (qh < qt) {
+            int u = adj[qh++], e;
+            for (e = head[u]; e >= 0; e = nxt[e]) if (!seen[to[e]]) { seen[to[e]] = 1; M->rev[to[e]] = M->rev[u] ^ ne[e]; adj[qt++] = to[e]; }
+        }
+    }
+    memset(off, 0, (ns + 2) * sizeof(int));                         /* single flips, best gain first */
+    for (k = 0; k < np; k++) { off[gp[k].a + 1]++; off[gp[k].b + 1]++; }
+    for (i = 0; i < ns; i++) off[i + 1] += off[i];
+    memcpy(q, off, (ns + 1) * sizeof(int));
+    for (k = 0; k < np; k++) { adj[q[gp[k].a]++] = k; adj[q[gp[k].b]++] = k; }
+    for (i = 0; i < ns; i++) p[i] = ho_glob_gain(M, i, off, adj, gp);
+    for (;;) {
+        int u = -1;
+        double bg = HO_INV_MINGAIN;
+        for (i = 0; i < ns; i++) if (p[i] > bg) { bg = p[i]; u = i; }
+        if (u < 0) break;
+        M->rev[u] ^= 1; p[u] = ho_glob_gain(M, u, off, adj, gp);
+        for (i = off[u]; i < off[u + 1]; i++) { int v = gp[adj[i]].a == u ? gp[adj[i]].b : gp[adj[i]].a; p[v] = ho_glob_gain(M, v, off, adj, gp); }
+    }
+    for (k = 0; k < nr; k++) {                                      /* equations: readings that agree with the strands (positions 0) */
+        const ho_rd_t *e = &S->R.a[k];
+        int s;
+        if ((M->rev[e->a] ^ M->rev[e->b]) != e->rel) continue;
+        d[nrow] = ho_sync_prop(M, S, k, e->b, &s);                  /* x_b - x_a, with x_a = 0 */
+        ra[nrow] = e->a; rb[nrow] = e->b; qw[nrow] = e->w; wt[nrow] = 1; cs[nrow] = ho_mg(2 * e->sl);
+        nrow++;
+    }
+    for (i = 0; i < ns; i++) x[i] = 0;
+    for (it = 0; it < HO_GLOB_IRLS && nrow > 0; it++) {             /* IRLS: weighted least squares by conjugate gradients */
+        double mx = 0, rr = 0, rr0 = 0;
+        int c;
+        memset(dg, 0, ns * sizeof(double)); memset(rhs, 0, ns * sizeof(double));
+        for (k = 0; k < nrow; k++) { double w = qw[k] * wt[k]; dg[ra[k]] += w; dg[rb[k]] += w; rhs[rb[k]] += w * d[k]; rhs[ra[k]] -= w * d[k]; }
+        for (i = 0; i < ns; i++) mx = MAX(mx, dg[i]);
+        for (i = 0; i < ns; i++) dg[i] += HO_GLOB_EPS * mx;
+        ho_glob_mul(ns, nrow, dg, ra, rb, qw, wt, x, Ap);
+        for (i = 0; i < ns; i++) { r[i] = rhs[i] - Ap[i]; p[i] = r[i]; rr += r[i] * r[i]; rr0 += rhs[i] * rhs[i]; }
+        for (c = 0; c < HO_GLOB_CG && rr > 1e-24 * rr0; c++) {
+            double pAp = 0, al, rn = 0;
+            ho_glob_mul(ns, nrow, dg, ra, rb, qw, wt, p, Ap);
+            for (i = 0; i < ns; i++) pAp += p[i] * Ap[i];
+            if (pAp <= 0) break;
+            al = rr / pAp;
+            for (i = 0; i < ns; i++) { x[i] += al * p[i]; r[i] -= al * Ap[i]; rn += r[i] * r[i]; }
+            for (i = 0; i < ns; i++) p[i] = r[i] + rn / rr * p[i];
+            rr = rn;
+        }
+        for (k = 0; k < nrow; k++) { double z = (x[rb[k]] - x[ra[k]] - d[k]) / cs[k]; wt[k] = 1 / (1 + z * z); }
+    }
+    for (i = 0; i < ns; i++) { M->pos[i] = x[i]; par[i] = i; }
+    for (k = 0; k < nrow; k++) { int u = ho_find_root(par, ra[k]), v = ho_find_root(par, rb[k]); if (u != v) par[u] = v; }
+    for (i = 0; i < ns; i++) { S->head[i] = S->tail[i] = -1; S->next[i] = -1; S->clen[i] = 0; }
+    for (i = 0; i < ns; i++) {                                      /* clusters: the components */
+        int c = ho_find_root(par, i);
+        S->cl[i] = c; S->clen[c] += M->slen[i];
+        if (S->head[c] < 0) S->head[c] = i; else S->next[S->tail[c]] = i;
+        S->tail[c] = i;
+    }
+    free(gp); free(off); free(adj); free(par); free(q); free(head); free(nxt); free(to); free(ne); free(seen);
+    free(dg); free(rhs); free(x); free(r); free(p); free(Ap); free(d); free(qw); free(wt); free(ra); free(rb); free(cs);
+}
+
+/* strategies: how the backbone is built (see the backbone notes); the whole layout is built with each automatic one and the best kept.
+ * "global" (ho_sync_global) is not automatic: on the test sets it won about as often as it lost, so it runs only on request
+ * (HO_STRATEGY=global). */
+typedef struct { const char *name; int defer, flip, global, autorun; } ho_strat_t;
+static const ho_strat_t ho_strat[] = {{"plain", 0, 0, 0, 1}, {"flip", 0, 1, 0, 1}, {"defer", 1, 0, 0, 1}, {"defer+flip", 1, 1, 0, 1},
+                                      {"global", 0, 0, 1, 0}};
+#define HO_NSTRAT ((int) (sizeof(ho_strat) / sizeof(ho_strat[0])))
+
+/* builds the backbone with strategy st; *ndef: sequences deferred (or that would be), *nflip: blocks flipped */
+static void ho_sync(ho_ctx_t *M, const ho_strat_t *st, int *ndef, int *nflip)
+{
+    int ns = M->ns, i, k, n, rnd, big, *adj, *ch, nn = ns, *stk;
+    uint8 *in, *sr;
+    double *sp;
     ho_sync_t S;
-    MYBZERO(&S, 1);
+    memset(&S, 0, sizeof(S));
     ho_sync_readings(M, &S);
     MYMALLOC(S.cl, ns); MYMALLOC(S.next, ns); MYMALLOC(S.head, ns); MYMALLOC(S.tail, ns); MYMALLOC(S.ver, ns); MYMALLOC(S.mark, ns);
-    MYMALLOC(S.clen, ns); MYMALLOC(adj, ns + 1);
+    MYMALLOC(S.clen, ns); MYMALLOC(adj, ns + 1); MYMALLOC(S.nd, ns); MYMALLOC(ch, 2 * ns + 2); MYMALLOC(stk, 2 * ns + 2); MYMALLOC(sp, ns); MYMALLOC(sr, ns);
+    in = calloc(ns + 1, 1);
+    if (!S.nd || !ch || !stk || !in || !sp || !sr) mem_alloc_error("hap order array");
     if (!S.cl || !S.next || !S.head || !S.tail || !S.ver || !S.mark || !S.clen || !adj) mem_alloc_error("hap order array");
     S.iv = calloc((size_t) ns * (M->ploidy + 1), sizeof(*S.iv)); S.ivmax = calloc((size_t) ns * (M->ploidy + 1), sizeof(double));
     if (!S.iv || !S.ivmax) mem_alloc_error("hap order array");
     for (i = 0; i < ns; i++) {
-        S.cl[i] = S.head[i] = S.tail[i] = i; S.next[i] = -1; S.ver[i] = S.mark[i] = 0; S.clen[i] = M->slen[i];
+        S.cl[i] = S.head[i] = S.tail[i] = S.nd[i] = i; S.next[i] = -1; S.ver[i] = S.mark[i] = 0; S.clen[i] = M->slen[i];
         M->rev[i] = 0; M->pos[i] = 0;
         if (M->hap[i] >= 1 && M->hap[i] <= M->ploidy) {
             kv_push(int, S.iv[i * (M->ploidy + 1) + M->hap[i]], i); S.ivmax[i * (M->ploidy + 1) + M->hap[i]] = M->slen[i];
         }
     }
-    for (k = 0; k < (int) S.R.n; k++) {                            /* merge clusters, best evidence first */
-        int a = S.R.a[k].a, b = S.R.a[k].b;
-        ho_mg_t g;
-        if (k > 0 && S.R.a[k - 1].a == a && S.R.a[k - 1].b == b) continue;
-        if (ho_sync_choose(M, &S, a, b, HO_SYNC_PEN, &g) && g.sc > 0) ho_heap_push(&S, &g);
-    }
-    while (S.H.n) {
-        ho_mg_t g = ho_heap_pop(&S);
-        if (S.head[g.A] < 0 || S.head[g.B] < 0 || S.ver[g.A] != g.va || S.ver[g.B] != g.vb) continue;
-        if (S.clen[g.B] > S.clen[g.A] && !ho_sync_choose(M, &S, g.B, g.A, HO_SYNC_PEN, &g)) continue;  /* the larger frame stays */
-        ho_sync_merge(M, &S, g.A, g.B, g.m, g.t);
-        n = ho_sync_adjacent(&S, g.A, adj);
-        for (i = 0; i < n; i++) {
-            int A = S.clen[g.A] >= S.clen[adj[i]] ? g.A : adj[i], B = A == g.A ? adj[i] : g.A;
-            ho_mg_t h;
-            if (ho_sync_choose(M, &S, A, B, HO_SYNC_PEN, &h) && h.sc > 0) ho_heap_push(&S, &h);
+    S.amb = calloc(S.R.n + 1, 1);
+    if (!S.amb) mem_alloc_error("hap order array");
+    for (k = 1; k < (int) S.R.n; k++)                              /* deferred: sequences with heavy readings on both strands */
+        if (S.R.a[k - 1].a == S.R.a[k].a && S.R.a[k - 1].b == S.R.a[k].b && MIN(S.R.a[k - 1].w, S.R.a[k].w) >= HO_INV_MINW)
+            in[S.R.a[k].a] = in[S.R.a[k].b] = 1;
+    for (*ndef = 0, i = 0; i < ns; i++) *ndef += in[i];
+    if (st->defer) for (k = 0; k < (int) S.R.n; k++) S.amb[k] = in[S.R.a[k].a] | in[S.R.a[k].b];
+    memset(in, 0, ns + 1);
+    if (st->global) ho_sync_global(M, &S);                         /* global solve, or merging */
+    else {
+        for (S.phase = 1; S.phase <= 2; S.phase++) {                   /* merge clusters, best evidence first (deferred readings: round 2) */
+            for (k = 0; k < (int) S.R.n; k++) {
+                int a = S.cl[S.R.a[k].a], b = S.cl[S.R.a[k].b];
+                ho_mg_t g;
+                if (a == b) continue;
+                if (S.clen[b] > S.clen[a]) { int t = a; a = b; b = t; }
+                if (ho_sync_choose(M, &S, a, b, HO_SYNC_PEN, &g) && g.sc > 0) ho_heap_push(&S, &g);
+            }
+            while (S.H.n) {
+                ho_mg_t g = ho_heap_pop(&S);
+                if (S.head[g.A] < 0 || S.head[g.B] < 0 || S.ver[g.A] != g.va || S.ver[g.B] != g.vb) continue;
+                if (S.clen[g.B] > S.clen[g.A] && !ho_sync_choose(M, &S, g.B, g.A, HO_SYNC_PEN, &g)) continue;  /* the larger frame stays */
+                ho_sync_merge(M, &S, g.A, g.B, g.m, g.t);
+                ch[2 * (nn - ns)] = S.nd[g.A]; ch[2 * (nn - ns) + 1] = S.nd[g.B]; S.nd[g.A] = nn++;
+                n = ho_sync_adjacent(&S, g.A, adj);
+                for (i = 0; i < n; i++) {
+                    int A = S.clen[g.A] >= S.clen[adj[i]] ? g.A : adj[i], B = A == g.A ? adj[i] : g.A;
+                    ho_mg_t h;
+                    if (ho_sync_choose(M, &S, A, B, HO_SYNC_PEN, &h) && h.sc > 0) ho_heap_push(&S, &h);
+                }
+            }
+        }
+        S.phase = 2;
+        for (;;) {                                                      /* clusters still apart: joined to the largest, largest first */
+            ho_mg_t g;
+            int B = -1;
+            for (big = -1, i = 0; i < ns; i++) if (S.head[i] >= 0 && (big < 0 || S.clen[i] > S.clen[big])) big = i;
+            n = ho_sync_adjacent(&S, big, adj);
+            for (i = 0; i < n; i++) if (B < 0 || S.clen[adj[i]] > S.clen[B]) B = adj[i];
+            if (B < 0 || !ho_sync_choose(M, &S, big, B, 0, &g)) break;
+            ho_sync_merge(M, &S, big, B, g.m, g.t);
+            ch[2 * (nn - ns)] = S.nd[big]; ch[2 * (nn - ns) + 1] = S.nd[B]; S.nd[big] = nn++;
         }
     }
-    for (;;) {                                                      /* clusters still apart: joined to the largest, largest first */
-        ho_mg_t g;
-        int B = -1;
-        for (big = -1, i = 0; i < ns; i++) if (S.head[i] >= 0 && (big < 0 || S.clen[i] > S.clen[big])) big = i;
-        n = ho_sync_adjacent(&S, big, adj);
-        for (i = 0; i < n; i++) if (B < 0 || S.clen[adj[i]] > S.clen[B]) B = adj[i];
-        if (B < 0 || !ho_sync_choose(M, &S, big, B, 0, &g)) break;
-        ho_sync_merge(M, &S, big, B, g.m, g.t);
-    }
+    for (big = -1, i = 0; i < ns; i++) if (S.head[i] >= 0 && (big < 0 || S.clen[i] > S.clen[big])) big = i;
+    *nflip = 0;
+    if (big >= 0 && st->flip)                                       /* flips */
+        for (rnd = 0; rnd < HO_SYNC_ROUNDS; rnd++) { int f = ho_sync_retry(M, &S, big, ch, nn, stk, adj, in, sp, sr); *nflip += f; if (f == 0) break; }
     for (i = 0; i < ns; i++) M->order[i] = i;                       /* refinement, strongest sequences first */
     for (i = 0; i < ns; i++) { M->strength[i] = 0; for (k = S.roff[i]; k < S.roff[i + 1]; k++) M->strength[i] += S.R.a[S.radj[k]].w; }
     ho_sref = M->strength; qsort(M->order, ns, sizeof(int), ho_cmp_strength);
@@ -3948,16 +4247,19 @@ static void ho_sync(ho_ctx_t *M)
     for (i = 0; i < ns; i++) M->state[i] = S.cl[i] == big && (S.roff[i + 1] > S.roff[i] || i == big);
     kv_destroy(S.R); kv_destroy(S.F); kv_destroy(S.P); kv_destroy(S.T); kv_destroy(S.H);
     for (i = 0; i < ns * (M->ploidy + 1); i++) kv_destroy(S.iv[i]);
-    free(S.iv); free(S.ivmax);
-    free(S.roff); free(S.radj); free(S.cl); free(S.next); free(S.head); free(S.tail); free(S.ver); free(S.mark); free(S.clen); free(adj);
+    free(S.iv); free(S.ivmax); free(S.amb);
+    free(S.roff); free(S.radj); free(S.cl); free(S.next); free(S.head); free(S.tail); free(S.ver); free(S.mark); free(S.clen); free(adj); free(S.nd); free(ch); free(stk); free(in); free(sp); free(sr);
 }
 
-static void ho_run_group(ho_ctx_t *M)
+/* the whole layout of the current group with strategy st; returns 0 (nothing built) if it would only repeat another strategy's:
+ * flips asked for but none made */
+static int ho_layout(ho_ctx_t *M, const ho_strat_t *st, int *ndef, ho_sc_t *fin)
 {
-    int ns = M->ns, i, s;
+    int ns = M->ns, i, s, nflip;
     double end, mn;
 
-    ho_sync(M);
+    ho_sync(M, st, ndef, &nflip);
+    if (st->flip && nflip == 0) return 0;
     ho_fill_nb(M);
 
     /* leftovers: against the backbone from their whole-overlap blocks, longest first */
@@ -3998,7 +4300,34 @@ static void ho_run_group(ho_ctx_t *M)
     for (i = 0; i < ns; i++) M->pos[i] -= mn;
 
     // fix inversions 
-    ho_invfix(M);
+    *fin = ho_invfix(M);
+    return 1;
+}
+
+/* lay out the current group (M->ns sequences, evidence already built): with every automatic strategy, keeping the layout of the best final
+ * score; a later strategy replaces the kept one only if it scores HO_INV_MINGAIN more.  Strategies that would repeat an earlier
+ * one are skipped (no sequence to defer; no flip made).  With one haplotype there is nothing to score: the plain strategy only. */
+static void ho_run_group(ho_ctx_t *M)
+{
+    int ns = M->ns, k, ndef = -1, best = -1;
+    const char *only = getenv("HO_STRATEGY");
+    double *bpos;
+    uint8 *brev, *bstate;
+    ho_sc_t bsc = {0, 0, 0, 0, 0};
+    MYMALLOC(bpos, ns); MYMALLOC(brev, ns); MYMALLOC(bstate, ns);
+    if (!bpos || !brev || !bstate) mem_alloc_error("hap order array");
+    for (k = 0; k < HO_NSTRAT; k++) {
+        const ho_strat_t *st = &ho_strat[k];
+        ho_sc_t sc;
+        if (only ? strcmp(only, st->name) != 0 : (!st->autorun || (k > 0 && M->ploidy < 2))) continue;
+        if (!only && st->defer && ndef == 0) continue;
+        if (!ho_layout(M, st, &ndef, &sc)) continue;
+        if (best >= 0 && sc.cw < bsc.cw + HO_INV_MINGAIN) continue;
+        best = k; bsc = sc;
+        memcpy(bpos, M->pos, ns * sizeof(double)); memcpy(brev, M->rev, ns); memcpy(bstate, M->state, ns);
+    }
+    if (best >= 0) { memcpy(M->pos, bpos, ns * sizeof(double)); memcpy(M->rev, brev, ns); memcpy(M->state, bstate, ns); }
+    free(bpos); free(brev); free(bstate);
 }
 
 static void build_haplotype_order(scf_block_t *blks, int nblk, ovl_t *ovls, uint64 *index,
@@ -5647,8 +5976,9 @@ add_block:
         hap_ovl_pair_t pr;
         ovl_t *o;
         hap_info_t *hseq, **hseqs;
-        int64 *hap_bpos, *hap_epos, *bbpos, ea, eb, ext_a, ext_b;
-        int na, nb, ca, cb, hi, hj, m, x, y, *hcnt;
+        int64 *hap_bpos, *hap_epos, *bbpos;
+        int64 ca, cb, ea, eb, ext_a, ext_b;
+        int na, nb, hi, hj, m, x, y, *hcnt;
         double *dp, v, best;
 
         MYCALLOC(hap_bpos, ploidy);
@@ -5773,7 +6103,7 @@ add_block:
                     }
                     if (dp[x] > best) best = dp[x];
                 }
-                fprintf(stderr, "[M::%s] LCS overlap H%d-H%d: %10.0f @ %10d %10d\n", __func__, hi, hj, best, ca, cb);
+                fprintf(stderr, "[M::%s] LCS overlap H%d-H%d: %10.0f @ %10lld %10lld\n", __func__, hi, hj, best, ca, cb);
             }
         }
         free(bbpos);

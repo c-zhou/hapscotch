@@ -87,6 +87,8 @@ static ko_longopt_t long_options[] = {
     { "ec-p-thresh",    ko_required_argument, 309 },
     { "ec-pal-size",    ko_required_argument, 310 },
     { "ec-pal-dens",    ko_required_argument, 311 },
+    { "hic-tmpdir",     ko_required_argument, 312 },
+    { "hic-memory",     ko_required_argument, 313 },
     { "hic-file",       ko_required_argument, 'c' },
     { "agp-file",       ko_required_argument, 'a' },
     { "no-contig-ec",   ko_no_argument,       'E' },
@@ -142,7 +144,7 @@ int main(int argc, char *argv[])
     ploidy_num = 0;
     min_ext = 50000;
     read_len = 150;
-    min_qual = 10;
+    min_qual = 0;
     dual_aln = 1;
     no_ec = 0;
     n_threads = 1;
@@ -199,6 +201,8 @@ int main(int argc, char *argv[])
         else if (c == 309) ec_conf.p_thresh = atof(opt.arg);
         else if (c == 310) ec_conf.pal_size = parse_num(opt.arg);
         else if (c == 311) ec_conf.pal_dens = atof(opt.arg);
+        else if (c == 312) HIC_TMP_DIR = opt.arg;
+        else if (c == 313) HIC_MEM_LIMIT = parse_num(opt.arg);
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -243,11 +247,18 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -Y                     write files needed for YaHS scaffolding\n");
         fprintf(fp_help, "    -B NUM                 minimum sequence size for scaffold extension bridging [50k]\n");
         fprintf(fp_help, "    -p INT                 genome ploidy number, set to 0 for auto estimation [%d]\n", ploidy_num);
-        fprintf(fp_help, "      --max-ploidy INT     upper limit of genome ploidy number to consider [%d]\n", MAX_PLOIDY_NUMBER);
+        fprintf(fp_help, "    -P INT                 upper limit of genome ploidy number to consider [%d]\n", MAX_PLOIDY_NUMBER);
         fprintf(fp_help, "    -c FILE                alignment file of HiC data to the genome sequences\n");
-        fprintf(fp_help, "      --file-type   STR    input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
-        fprintf(fp_help, "      --read-length INT    read length (required for PA5 format input) [%d]\n", read_len);
-        fprintf(fp_help, "      --min-quality INT    minimum mapping quality of reads used for phasing [%d]\n", min_qual);
+        if (long_help) {
+            fprintf(fp_help, "\n");
+            fprintf(fp_help, "    Options for HiC processing:\n");
+            fprintf(fp_help, "      --file-type   STR    input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
+            fprintf(fp_help, "      --read-length INT    read length (required for PA5 format input) [%d]\n", read_len);
+            fprintf(fp_help, "      --min-quality INT    minimum mapping quality of reads used for phasing [%d]\n", min_qual);
+            fprintf(fp_help, "      --hic-tmpdir  STR    temporary directory for HiC processing [%s]\n", HIC_TMP_DIR);
+            fprintf(fp_help, "      --hic-memory  NUM    memory limit for HiC processing [%lldG]\n", HIC_MEM_LIMIT / (1 << 30));
+            fprintf(fp_help, "\n");
+        }
         fprintf(fp_help, "    -w INT                 window size for counting hic links [%d]\n", HIC_WINDOW_SIZE);
         fprintf(fp_help, "    -t INT                 maximum number of threads to use [%d]\n", n_threads);
         fprintf(fp_help, "    -o STR                 string prefix of output files [%s]\n", pref_out);
@@ -294,6 +305,9 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[E::%s] invalid read length: %d\n", __func__, read_len);
         return 1;
     }
+
+    if (n_threads <= 0) n_threads = 1;
+    if (n_threads > 1)  HIC_THREADS = n_threads;
 
     // read sequence dictionary
     dicts_raw = make_sdict_from_index(argv[opt.ind], 0);
@@ -424,6 +438,7 @@ int main(int argc, char *argv[])
 
 static void contig_error_correction(char *hic_bfile, char *paf_file, sdict_t *dicts, int n_threads, char *agp_ec)
 {
+    hic_store_t hstore;
     ec_pos_t *calls;
     uint64 *palis;
     FILE *fo;
@@ -433,11 +448,12 @@ static void contig_error_correction(char *hic_bfile, char *paf_file, sdict_t *di
     int i, ncall, npali;
 
     // call error correction positions from Hi-C
+    MYBZERO(&hstore, 1);
     nhic = 0;
-    hics = read_hic_from_binary(hic_bfile, dicts, ec_conf.bin_size, 0, &nhic);
+    hics = read_hic_extern(hic_bfile, dicts, NULL, ec_conf.bin_size, 0, HIC_INTRA, 0, &nhic, &hstore);
     ncall = 0;
     calls = ec_call_breaks(hics, nhic, dicts, &ncall);
-    free(hics);
+    hic_store_release(&hstore, hics);
     
     // call error correction positions from palindromes
     naln = 0;

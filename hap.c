@@ -308,64 +308,6 @@ static int hlk_pval_cmpfunc(const void *a, const void *b)
     return (x->v < y->v) - (x->v > y->v);
 }
 
-typedef struct {
-    int a, b;
-    int64 s, e;
-} hidx_t;
-
-// same ordering as hic_cmpfunc in hic.c
-static int hic_link_cmpfunc(const void *a, const void *b)
-{
-    const hic_t *x = a, *y = b;
-    if (x->aseq != y->aseq)
-        return (x->aseq > y->aseq) - (x->aseq < y->aseq);
-    if (x->bseq != y->bseq)
-        return (x->bseq > y->bseq) - (x->bseq < y->bseq);
-    if (x->apos != y->apos)
-        return (x->apos > y->apos) - (x->apos < y->apos);
-    return (x->bpos > y->bpos) - (x->bpos < y->bpos);
-}
-
-static hidx_t *build_hidx(hic_t *hics, int64 nhic, int64 *_nidx)
-{
-    if (nhic == 0) {
-        *_nidx = 0;
-        return NULL;
-    }
-
-    kvec_t(hidx_t) hidx;
-    hidx_t *idx;
-    int64 i;
-    int a, b;
-
-    kv_init(hidx);
-    kv_resize(hidx_t, hidx, 1<<20);
-
-    a = hics[0].aseq;
-    b = hics[0].bseq;
-    kv_pushp(hidx_t, hidx, &idx);
-    idx->a = a;
-    idx->b = b;
-    idx->s = 0;
-    for (i = 1; i < nhic; i++) {
-        if (hics[i].aseq != a || hics[i].bseq != b) {
-            idx->e = i;
-            a = hics[i].aseq;
-            b = hics[i].bseq;
-            kv_pushp(hidx_t, hidx, &idx);
-            idx->a = a;
-            idx->b = b;
-            idx->s = i;
-        }
-    }
-    idx->e = nhic;
-
-    MYREALLOC(hidx.a, hidx.n);
-    *_nidx = hidx.n;
-
-    return hidx.a;
-}
-
 static int64 lower_bound_apos(hic_t *hics, int64 low, int64 high, int apos)
 {
     int64 mid;
@@ -392,95 +334,6 @@ static int64 upper_bound_apos(hic_t *hics, int64 low, int64 high, int apos)
         }
     }
     return low;
-}
-
-// binary search for the (a, b, [ab, ae])
-static int64 hidx_bsearch(hic_t *hics, hidx_t *hidx, int64 nidx, int a, int b, int ab, int ae, 
-    int64 *_s, int64 *_e)
-{
-    *_s = 0;
-    *_e = 0;
-    
-    if (nidx == 0 || ab > ae) { 
-        return 0;
-    }
-
-    int64 low, mid, high, block_start, block_end;
-    
-    low = 0;
-    high = nidx - 1;
-    block_start = block_end = -1;
-    // find a-b block
-    while (low <= high) {
-        mid = low + (high - low) / 2;
-        if (hidx[mid].a == a && hidx[mid].b == b) {
-            block_start = hidx[mid].s;
-            block_end = hidx[mid].e;
-            break;
-        } else if (hidx[mid].a < a || 
-            (hidx[mid].a == a && hidx[mid].b < b)) {
-            low = mid + 1;
-        } else {
-            high = mid - 1;
-        }
-    }
-
-    // block not found
-    if (block_start == -1)
-        return 0;
-
-    // find first element >= ab
-    *_s = lower_bound_apos(hics, block_start, block_end, ab);
-
-    // find first element > ae
-    *_e = upper_bound_apos(hics, *_s, block_end, ae);
-
-    return *_e - *_s;
-}
-
-static int64 count_cis_links(hic_t *hics, int64 s, int64 e, uint32 ab, uint32 ae, uint32 bb, uint32 be)
-{
-    int64 i, cnt;
-    uint32 apos, bpos;
-    hic_t *h;
-
-    cnt = 0;
-    h = hics + s;
-    for (i = s; i < e; i++, h++) {
-        apos = h->apos;
-        bpos = h->bpos;
-        // find if overlaps with the given positions
-        if (ab <= apos && apos <= ae && 
-            bb <= bpos && bpos <= be)
-            cnt += h->nhic;
-    }
-
-    return cnt;
-}
-
-static int64 count_trans_links(hic_t *hics, hidx_t *hidx, int64 nidx,
-    int a, int a_wb, int a_we, ovl_t *ovls, uint32 novl, int b_wb, int b_we)
-{
-    int64 i, s, e, cnt;
-    int b, bb, be;
-
-    cnt = 0;
-    for (i = 0; i < novl; i++, ovls++) {
-        if (ovls->del)
-            continue;
-        b = ovls->bread;
-        if (b == a)
-            continue;
-        // skip overlaps that don't touch b's window range [b_wb, b_we)
-        if (ovls->aepos / HIC_WINDOW_SIZE < b_wb || ovls->abpos / HIC_WINDOW_SIZE >= b_we)
-            continue;
-        bb = ovls->bbpos / HIC_WINDOW_SIZE;
-        be = ovls->bepos / HIC_WINDOW_SIZE;
-        if (hidx_bsearch(hics, hidx, nidx, b, a, bb, be, &s, &e) > 0)
-            cnt += count_cis_links(hics, s, e, bb, be, a_wb, a_we);
-    }
-
-    return cnt;
 }
 
 typedef struct {
@@ -653,211 +506,328 @@ void set_hic_window(int window)
         MIN_HIC_WINDOW = 1;
 }
 
-static void test_hic_linkage_map(hlk_t *hlks, int64 nhlk, ovl_t *ovls, int64 novl, sdict_t *dicts)
+static inline int seq_nwin_ceil(uint32 len, int w) 
+{ 
+    return len ? (int) ((len - 1) / (uint32) w) + 1 : 0; 
+}
+
+static inline int seq_nwin_floor(uint32 len, int w) 
+{ 
+    return (int) (len / (uint32) w); 
+}
+
+/**********************************************************************************/
+/*
+ * Streaming linkage computation
+ *
+ * The sorted symmetric links are read twice, front to back, one row (aseq)
+ * at a time; nothing needs random access into the full link set.
+ *  pass 1: summary statistics, intra-distance histogram (-> Wend), per-window
+ *          inter link counts (-> hcnts_beg/end), covered-window ranges
+ *  pass 2: each row a keeps only links with apos in a's terminal windows, plus
+ *          the list of its blocks (bseq values). All counts of the test for a
+ *          pair (a, b), a < b, come from such rows:
+ *          - cish:     block (a, b), apos in a's end, bpos in b's end
+ *          - transh_a: blocks (a, b') for b' overlapping b; these are the mirror
+ *                      images of the (b', a) blocks v1 looked up at random
+ *          - transh_b: needs row b, so the pair waits until the sweep reaches
+ *                      row b and is completed there from blocks (b, a')
+ **********************************************************************************/
+
+typedef struct {
+    const uint32 *tl;   // sequence lengths
+    int bin;
+    uint8 *wmark;
+    int64 slen, all_w, cov_w, inter_w, intra_w, inter_c, intra_c;
+} hstats_t;
+
+static void hic_stats_init(hstats_t *st, const uint32 *tl, int64 nseq, int bin_size)
 {
-    hlk_t *hlk;
-    ovl_t *ovl;
-    ord_dbl_t *hords;
-    uint64 *hindex, *oindex;
-    int a, b, g, n, qs, qe, nseq, *smarks, *sgroup, *squeue;
-    int64 i, j, k, slen, olen;
-
-    // number of sequences
-    nseq = dicts->n;
-
-    // build index for quick search
-    MYCALLOC(hindex, nseq);
-    MYCALLOC(oindex, nseq);
-    MYCALLOC(smarks, nseq);
-    MYCALLOC(sgroup, nseq);
-    MYCALLOC(squeue, nseq);
-    MYMALLOC(hords, nhlk);
-    if (hindex == NULL || oindex == NULL || smarks == NULL || 
-        sgroup == NULL || squeue == NULL || hords == NULL)
-        mem_alloc_error("hic linkage map index");
-
-    // build index for hic linkages
-    a = hlks->a;
-    for (i = 1, j = 0; i < nhlk; i++) {
-        if (hlks[i].a != a) {
-            hindex[a] = (uint64) j << 32 | (i - j);
-            a = hlks[i].a;
-            j = i;
-        }
-    }
-    hindex[a] = (uint64) j << 32 | (i - j);
-    
-    // build index for overlaps
-    a = ovls->aread;
-    for (i = 1, j = 0; i < novl; i++) {
-        if (ovls[i].aread != a) {
-            oindex[a] = (uint64) j << 32 | (i - j);
-            a = ovls[i].aread;
-            j = i;
-        }
-    }
-    oindex[a] = (uint64) j << 32 | (i - j);
-
-    // hic linkages
-    for (i = 0; i < nhlk; i++) {
-        hlk = hlks + i;
-        fprintf(stdout, "H %s\t%12d\t%s\t%12d\t%.3f\t%.3f\t%.3e\n", 
-            dicts->s[hlk->a].name, dicts->s[hlk->a].len, 
-            dicts->s[hlk->b].name, dicts->s[hlk->b].len, 
-            hlk->l, hlk->v, hlk->p);
-    }
-
-    // group sequences by hic linkages
-    MYBZERO(sgroup, nseq);
-    MYBZERO(smarks, nseq);
-    g = 0;
+    int64 i;
+    int w, max_n = 1;
+    MYBZERO(st, 1);
+    st->tl = tl;
+    st->bin = bin_size;
     for (i = 0; i < nseq; i++) {
-        if (sgroup[i])
+        st->slen += tl[i];
+        w = seq_nwin_ceil(tl[i], bin_size);
+        st->all_w += w;
+        max_n = MAX(max_n, w);
+    }
+    MYCALLOC(st->wmark, max_n);
+    if (st->wmark == NULL)
+        mem_alloc_error("mark array");
+}
+
+static inline void hic_stats_add(hstats_t *st, int s, const hic_t *h)
+{
+    if (h->bseq == s) {
+        st->intra_c += h->nhic;
+        st->wmark[h->apos] |= 0x1;
+        st->wmark[h->bpos] |= 0x1;
+    } else {
+        st->inter_c += h->nhic;
+        st->wmark[h->apos] |= 0x2;
+    }
+}
+
+static void hic_stats_row_end(hstats_t *st, int s)
+{
+    int j, m = seq_nwin_ceil(st->tl[s], st->bin);
+    for (j = 0; j < m; j++) {
+        if (st->wmark[j])
+            st->cov_w++;
+        if (st->wmark[j] & 0x1)
+            st->intra_w++;
+        if (st->wmark[j] & 0x2)
+            st->inter_w++;
+    }
+    MYBZERO(st->wmark, m);
+}
+
+static void hic_linkage_stats(hstats_t *st)
+{
+    int64 inter_c = st->inter_c / 2; // each inter link is counted twice
+    int64 total_c = inter_c + st->intra_c;
+
+    fprintf(stderr, "[M::%s] HiC links summary statistics\n", __func__);
+    fprintf(stderr, "[M::%s] total sequence: %12lld\n", __func__, st->slen);
+    fprintf(stderr, "[M::%s]    window size: %12d\n", __func__, st->bin);
+    fprintf(stderr, "[M::%s]    no. windows: %12lld\n", __func__, st->all_w);
+    fprintf(stderr, "[M::%s] hic link counts\n", __func__);
+    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, total_c);
+    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, st->intra_c);
+    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_c);
+    fprintf(stderr, "[M::%s] sequence window\n", __func__);
+    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, st->cov_w);
+    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, st->intra_w);
+    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, st->inter_w);
+    fprintf(stderr, "[M::%s] links per window\n", __func__);
+    fprintf(stderr, "[M::%s]        - total: %12.3e\n", __func__, (double) total_c / st->cov_w);
+    fprintf(stderr, "[M::%s]        - intra: %12.3e\n", __func__, (double) st->intra_c / st->cov_w);
+    fprintf(stderr, "[M::%s]        - inter: %12.3e\n", __func__, (double) inter_c / st->cov_w);
+    fprintf(stderr, "[M::%s] links per base: %12.3e\n", __func__, (double) total_c / st->slen);
+
+    free(st->wmark);
+    st->wmark = NULL;
+}
+
+typedef struct { int b; int64 s, e; } rblk_t;  // records [s, e) of a row with this bseq
+
+typedef struct {
+    int a;                   // row sequence (aseq)
+    kvec_t(hic_t) h;         // terminal records of the row, in file order
+    kvec_t(rblk_t) blk;      // every block of the row (also those without terminal records)
+} hrow_t;
+
+// links of block (row, b) with apos in [ab, ae] and bpos in [bb, be] (inclusive)
+static int64 hrow_count(const hrow_t *row, int b, int ab, int ae, int bb, int be)
+{
+    int64 lo, hi, mid, s, e, i, cnt;
+    if (ab > ae || bb > be || row->blk.n == 0)
+        return 0;
+    lo = 0;
+    hi = (int64) row->blk.n - 1;
+    mid = -1;
+    while (lo <= hi) {
+        mid = lo + (hi - lo) / 2;
+        if (row->blk.a[mid].b == b) break;
+        if (row->blk.a[mid].b < b) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    if (lo > hi)
+        return 0;
+    s = lower_bound_apos(row->h.a, row->blk.a[mid].s, row->blk.a[mid].e, ab);
+    e = upper_bound_apos(row->h.a, s, row->blk.a[mid].e, ae);
+    for (cnt = 0, i = s; i < e; i++)
+        if (bb <= row->h.a[i].bpos && row->h.a[i].bpos <= be)
+            cnt += row->h.a[i].nhic;
+    return cnt;
+}
+
+// v1's count_trans_links(x, [x_wb, x_we], overlaps of y, [y_wb, y_we)), answered from
+// the mirrored blocks (x, c) of row x instead of the blocks (c, x) of the other rows
+static int64 hrow_trans(const hrow_t *row, int x, int x_wb, int x_we, ovl_t *ovls, uint32 novl, int y_wb, int y_we)
+{
+    int64 i, cnt;
+    int c, bb, be;
+
+    cnt = 0;
+    for (i = 0; i < novl; i++, ovls++) {
+        if (ovls->del)
             continue;
-        qs = qe = 0;
-        squeue[qe++] = i;
-        smarks[i] = 1;
-        while (qs < qe) {
-            a = squeue[qs++];
-            hlk = hlks + (hindex[a] >> 32);
-            n = (uint32) hindex[a];
-            for (j = 0; j < n; j++, hlk++) {
-                b = hlk->b;
-                if (!smarks[b]) {
-                    squeue[qe++] = b;
-                    smarks[b] = 1;
+        c = ovls->bread;
+        if (c == x)
+            continue;
+        // skip overlaps that don't touch y's window range [y_wb, y_we)
+        if (ovls->aepos / HIC_WINDOW_SIZE < y_wb || ovls->abpos / HIC_WINDOW_SIZE >= y_we)
+            continue;
+        bb = ovls->bbpos / HIC_WINDOW_SIZE;
+        be = ovls->bepos / HIC_WINDOW_SIZE;
+        cnt += hrow_count(row, c, x_wb, x_we, bb, be);
+    }
+    return cnt;
+}
+
+// a candidate pair (a, b), a < b, waiting for row b
+typedef struct {
+    int a, b;
+    int a_wb, a_we, b_wb, b_we;
+    int best_ea, best_eb;
+    int64 cish, transh_a;
+    int64 next;              // next pair waiting for the same row
+} hpend_t;
+
+typedef struct {
+    const uint32 *tl;
+    int Wend;
+    const uint8 *smark;
+    const uint64 *index;
+    ovl_t *ovls;
+    const int *clens_beg, *clens_end, *tlens_beg, *tlens_end;
+    const int64 *hcnts_beg, *hcnts_end;
+    int64 htot;
+    kvec_t(hpend_t) pend;
+    int64 *phead;            // per row: first pair waiting for it, -1 if none
+    kvec_t(hlk_t) hlks;
+} hlctx_t;
+
+static void hlink_finish(hlctx_t *c, const hpend_t *P, int64 transh_b)
+{
+    int a = P->a, b = P->b;
+    int64 cish_ab = P->cish, transh_a = P->transh_a;
+    int64 cisl_a, cisl_b, transl_a, transl_b, hc_a, hc_b;
+    double p1, p2, p3, p_val, cis_l, d_val;
+
+    cisl_a   = P->best_eb == 0? c->clens_beg[b] : c->clens_end[b];
+    cisl_b   = P->best_ea == 0? c->clens_beg[a] : c->clens_end[a];
+    transl_a = P->best_eb == 0? c->tlens_beg[b] : c->tlens_end[b];
+    transl_b = P->best_ea == 0? c->tlens_beg[a] : c->tlens_end[a];
+
+    hc_a = (P->best_ea == 0) ? c->hcnts_beg[a] : c->hcnts_end[a];
+    hc_b = (P->best_eb == 0) ? c->hcnts_beg[b] : c->hcnts_end[b];
+    p1 = calculate_poisson_pvalue(cish_ab, (double) hc_a * hc_b / c->htot);
+
+    p2 = (cisl_a + transl_a > 0)
+         ? calculate_binomial_pvalue(cish_ab, cish_ab + transh_a, (double) cisl_a / (cisl_a + transl_a))
+         : 1.0;
+    p3 = (cisl_b + transl_b > 0)
+         ? calculate_binomial_pvalue(cish_ab, cish_ab + transh_b, (double) cisl_b / (cisl_b + transl_b))
+         : 1.0;
+
+    p_val = p1;
+    p_val = MAX(p_val, p2);
+    p_val = MAX(p_val, p3);
+
+    cis_l = 2.0 * cisl_a * cisl_b / (cisl_a + cisl_b);
+    d_val = cish_ab / sqrt(cisl_a) / sqrt(cisl_b);
+
+    kv_push(hlk_t, c->hlks, ((hlk_t) {a, b, cis_l, d_val, p_val}));
+}
+
+// process row r: complete the pairs (a, r) waiting for it, then start the pairs (r, b), b > r
+static void hlink_row(hlctx_t *c, hrow_t *row)
+{
+    int r = row->a, a, b, Wend = c->Wend;
+    int a_wl, b_wl, a_st, b_st, ea, eb, ea_wb, ea_we, eb_wb, eb_we;
+    int a_wb, a_we, b_wb, b_we, best_ea, best_eb;
+    int64 k, n, cish_ab, transh_a, transh_b;
+    size_t t;
+    hpend_t *P;
+
+    // 1. pairs (a, r): transh_b from the blocks (r, a') of this row
+    for (k = c->phead[r]; k >= 0; k = P->next) {
+        P = &c->pend.a[k];
+        a = P->a;
+        transh_b = hrow_trans(row, r, P->b_wb, P->b_we - 1,
+            c->ovls + (c->index[a] >> 32), (uint32) c->index[a], P->a_wb, P->a_we);
+        hlink_finish(c, P, transh_b);
+    }
+    c->phead[r] = -1;
+
+    // 2. pairs (r, b), b > r: everything else comes from this row
+    a = r;
+    if (c->smark[a])
+        return;
+    a_wl = seq_nwin_floor(c->tl[a], HIC_WINDOW_SIZE);
+    a_st = (a_wl <= Wend);
+    for (t = 0; t < row->blk.n; t++) {
+        b = row->blk.a[t].b;
+        if (a >= b || c->smark[b])
+            continue;
+        if (find_b_overlap(c->ovls + (c->index[a] >> 32), (uint32) c->index[a], b))
+            continue; // skip overlapped sequences
+
+        // check four beg/end recombinations to find the one with the most cis links
+        b_wl = seq_nwin_floor(c->tl[b], HIC_WINDOW_SIZE);
+        b_st = (b_wl <= Wend);
+        best_ea = best_eb = 0;
+        cish_ab = -1;
+        for (ea = 0; ea <= (a_st ? 0 : 1); ea++) {
+            if (ea == 0) {
+                ea_wb = 0;
+                ea_we = MIN(a_wl, Wend);
+            } else {
+                ea_wb = a_wl - Wend;
+                ea_we = a_wl;
+            }
+            for (eb = 0; eb <= (b_st ? 0 : 1); eb++) {
+                if (eb == 0) {
+                    eb_wb = 0;
+                    eb_we = MIN(b_wl, Wend);
+                } else {
+                    eb_wb = b_wl - Wend;
+                    eb_we = b_wl;
+                }
+                n = hrow_count(row, b, ea_wb, ea_we - 1, eb_wb, eb_we - 1);
+                if (n > cish_ab) {
+                    cish_ab = n;
+                    best_ea = ea;
+                    best_eb = eb;
                 }
             }
         }
-        g++;
-        slen = 0;
-        for (j = 0; j < qe; j++) {
-            a = squeue[j];
-            sgroup[a] = g;
-            slen += dicts->s[a].len;
-        }
-        olen = 0;
-        for (j = 0; j < qe; j++) {
-            a = squeue[j];
-            ovl = ovls + (oindex[a] >> 32);
-            n = (uint32) oindex[a];
-            for (k = 0; k < n; k++, ovl++) {
-                b = ovl->bread;
-                if (sgroup[b] == g)
-                    olen += ovl->bepos - ovl->bbpos;
-            }
-        }
-        olen /= 2; // each overlap is counted twice
-
-        fprintf(stdout, "G %6d %6d %12lld %12lld\n", g, qe, slen, olen);
-    }
-
-    free(hindex);
-    free(oindex);
-    free(smarks);
-    free(sgroup);
-    free(squeue);
-    free(hords);
-}
-
-static void hic_linkage_stats(hic_t *hics, int64 nhic, sdict_t *dicts, int bin_size)
-{
-    // some statistics for hic links
-    int64 slen, all_w, cov_w, inter_w, intra_w;
-    int64 inter_c, intra_c, total_c;
-    uint8 *wmark;
-    int i, j, m, w, s, nseq, max_n;
-
-    nseq = dicts->n;
-    slen = 0;
-    all_w = 0;
-    max_n = 1;
-    for (i = 0; i < nseq; i++) {
-        w = dicts->s[i].len;
-        slen += w;
-        w = (w - 1) / bin_size + 1;
-        all_w += w;
-        max_n = MAX(max_n, w);
-    }
-    // number of windows
-    MYCALLOC(wmark, max_n);
-    if (wmark == NULL)
-        mem_alloc_error("mark array");
-    
-    inter_c = intra_c = 0;
-    inter_w = intra_w = 0;
-    cov_w = 0;
-    s = hics[0].aseq;
-    for (i = 0; i <= nhic; i++) {
-        if (i == nhic || hics[i].aseq != s) {
-            m = (dicts->s[s].len - 1) / bin_size + 1;
-            for (j = 0; j < m; j++) {
-                if (wmark[j])
-                    cov_w++;
-                if (wmark[j] & 0x1)
-                    intra_w++;
-                if (wmark[j] & 0x2)
-                    inter_w++;
-            }
-            if (i == nhic) break;
-            s = hics[i].aseq;
-            MYBZERO(wmark, max_n);
-        }
-        if (hics[i].bseq == s) {
-            intra_c += hics[i].nhic;
-            wmark[hics[i].apos] |= 0x1;
-            wmark[hics[i].bpos] |= 0x1;
+        // set final end window ranges
+        if (best_ea == 0) {
+            a_wb = 0;
+            a_we = MIN(a_wl, Wend);
         } else {
-            inter_c += hics[i].nhic;
-            wmark[hics[i].apos] |= 0x2;
+            a_wb = a_wl - Wend;
+            a_we = a_wl;
         }
+        if (best_eb == 0) {
+            b_wb = 0;
+            b_we = MIN(b_wl, Wend);
+        } else {
+            b_wb = b_wl - Wend;
+            b_we = b_wl;
+        }
+
+        if (cish_ab < MIN_CIS_HLINK)
+            continue;
+
+        transh_a = hrow_trans(row, a, a_wb, a_we - 1,
+            c->ovls + (c->index[b] >> 32), (uint32) c->index[b], b_wb, b_we);
+
+        kv_pushp(hpend_t, c->pend, &P);
+        *P = (hpend_t) {a, b, a_wb, a_we, b_wb, b_we, best_ea, best_eb, cish_ab, transh_a, c->phead[b]};
+        c->phead[b] = (int64) c->pend.n - 1;
     }
-    inter_c /= 2; // each inter link is counted twice
-    total_c = inter_c + intra_c;
-
-    fprintf(stderr, "[M::%s] HiC links summary statistics\n", __func__);
-    fprintf(stderr, "[M::%s] total sequence: %12lld\n", __func__, slen);
-    fprintf(stderr, "[M::%s]    window size: %12d\n", __func__, bin_size);
-    fprintf(stderr, "[M::%s]    no. windows: %12lld\n", __func__, all_w);
-    fprintf(stderr, "[M::%s] hic link counts\n", __func__);
-    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, total_c);
-    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, intra_c);
-    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_c);
-    fprintf(stderr, "[M::%s] sequence window\n", __func__);
-    fprintf(stderr, "[M::%s]        - total: %12lld\n", __func__, cov_w);
-    fprintf(stderr, "[M::%s]        - intra: %12lld\n", __func__, intra_w);
-    fprintf(stderr, "[M::%s]        - inter: %12lld\n", __func__, inter_w);
-    fprintf(stderr, "[M::%s] links per window\n", __func__);
-    fprintf(stderr, "[M::%s]        - total: %12.3e\n", __func__, (double) total_c/cov_w);
-    fprintf(stderr, "[M::%s]        - intra: %12.3e\n", __func__, (double) intra_c/cov_w);
-    fprintf(stderr, "[M::%s]        - inter: %12.3e\n", __func__, (double) inter_c/cov_w);
-    fprintf(stderr, "[M::%s] links per base: %12.3e\n", __func__, (double) total_c/slen);
-
-    free(wmark);
 }
 
-static hic_t *add_symmetric_hic_links(hic_t *hics, int64 *_nhic) 
+static inline uint32 hic_target_nseq(const sdict_t *dicts, const asm_dict_t *adict)
 {
-    int64 i, mhic, nhic;
-    
-    mhic = nhic = *_nhic;
-    for (i = 0; i < nhic; i++)
-        mhic += (hics[i].aseq != hics[i].bseq);
-    MYREALLOC(hics, mhic);
-    if (hics == NULL)
-        mem_alloc_error("HiC links array");
-    mhic = nhic;
-    for (i = 0; i < mhic; i++)
-        if (hics[i].aseq != hics[i].bseq)
-            hics[nhic++] = (hic_t){hics[i].bseq, hics[i].bpos, hics[i].aseq, hics[i].apos, hics[i].nhic};
-    // sort the HiC links
-    qsort(hics, nhic, sizeof(hic_t), hic_link_cmpfunc);
-
-    *_nhic = nhic;
-    return hics;
+    return adict ? (uint32) adict->n : (uint32) dicts->n;
 }
 
-static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t *dicts, asm_dict_t *break_dict, ovl_t *ovls, int64 novl, int64 *_nhlk)
+static inline uint64 hic_target_len(const sdict_t *dicts, const asm_dict_t *adict, uint32 i)
+{
+    return adict ? (uint64) adict->s[i].len : (uint64) dicts->s[i].len;
+}
+
+#define RNG_COMPACT (1 << 22) // merge a row's pending ranges once there are this many
+
+static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t *dicts, asm_dict_t *adict, ovl_t *ovls, int64 novl, int64 *_nhlk)
 {
     if (_nhlk) *_nhlk = 0;
     if (hic_bfile == NULL)
@@ -867,62 +837,59 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     kvec_t(hlk_t) hlks;
     range_t *rng, *srngs;
     uint64 *index, *ridx;
-    hidx_t *hidx, *idx;
     ovl_t *ov;
     ovl_cnt_t *oc, *tcnts;
     ord_dbl_t *sords;
-    hic_t *hics;
+    hic_t *h;
+    hic_stream_t hs;
+    hstats_t hst;
+    hrow_t row;
+    hlctx_t ctx;
     uint8 *smark;
-    int64 i, j, n, s, e, nseq, mseq, nidx, stot, htot, nhlk, nhic, *wcnts, *hcnts, *hcnts_beg, *hcnts_end;
-    int64 acnt, tcnt, hc_a, hc_b, cish_ab, cisl_a, cisl_b, transh_a, transh_b, transl_a, transl_b;
-    double h_pb, p1, p2, p3, cis_l, d_val, p_val, p_thresh, nf, median;
-    int a, b, p, w, *clens, *clens_beg, *clens_end, *tlens, *tlens_beg, *tlens_end;
-    int a_wb, a_we, b_wb, b_we, best_ea, best_eb;
-    int a_wl, b_wl, a_st, b_st, ea, eb, ea_wb, ea_we, eb_wb, eb_we;
+    uint32 *tl;
+    int64 i, j, k, m, n, s, nseq, mseq, stot, htot, nhlk, nhic, nwtot, rb0, ri;
+    int64 *woff, *wincnt, *wcnts, *hcnts, *hcnts_beg, *hcnts_end, acnt, tcnt;
+    double h_pb, nf, median, p_thresh;
+    int a, p, w, cur, curb, ropen, *clens, *clens_beg, *clens_end, *tlens, *tlens_beg, *tlens_end;
+    int a_wb, a_we, b_wb, b_we, a_wl, b_wl, t_beg, t_lo;
     int Wend;
 
-#undef TEST_HIC
-#ifdef TEST_HIC
-    // read HiC links                                                        
-    FILE *fp = fopen(hic_bfile, "r");                                        
-    fread(&nhic, sizeof(int64), 1, fp);                                      
-    MYMALLOC(hics, nhic);
-    if (hics == NULL)
-        mem_alloc_error("HiC links array");
-    fread(hics, sizeof(hic_t), nhic, fp);
-    fclose(fp);
-#else
-    // read HiC links
-    // with a break AGP the binary file is on the raw sequences
+    // links and overlaps refer to the target sequences of the conversion (adict if given)
+    nseq = hic_target_nseq(dicts, adict);
+    MYMALLOC(tl, MAX(nseq, 1));
+    if (tl == NULL) mem_alloc_error("sequence lengths");
+    for (i = 0; i < nseq; i++)
+        tl[i] = (uint32) hic_target_len(dicts, adict, i);
+
+    // read HiC links: a sorted, symmetric set read as a stream of rows
+    // with a break AGP the binary file is on the raw sequences and
     // coordinates are converted to piece coordinates while reading
     nhic = 0;
-    hics = break_dict?
-        read_hic_from_binary_sd_conversion((char *) hic_bfile, break_dict, HIC_WINDOW_SIZE, min_qual, &nhic) :
-        read_hic_from_binary((char *) hic_bfile, dicts, HIC_WINDOW_SIZE, min_qual, &nhic);
-    // make the HiC links symmetric
-    hics = add_symmetric_hic_links(hics, &nhic);
-    // some basic statistics
-    hic_linkage_stats(hics, nhic, dicts, HIC_WINDOW_SIZE);
-#endif
-
-    if (hics == NULL || nhic == 0) {
+    nhic = read_hic_extern_stream((char *) hic_bfile, dicts, adict, HIC_WINDOW_SIZE, 
+        min_qual, HIC_ALL, 1, &hs);
+    if (nhic == 0) {
         fprintf(stderr, "[M::%s] no valid HiC links found in the input file\n", __func__);
+        hic_stream_close(&hs);
+        free(tl);
         return NULL;
     }
-    
-    // sequence number
-    nseq = dicts->n;
-    
-    // maximum sequence length in windows
-    mseq = 0;
+
+    // windows per sequence, and an offset table for per-window arrays
+    mseq = nwtot = 0;
+    MYMALLOC(woff, nseq + 1);
+    if (woff == NULL) mem_alloc_error("window offsets");
     for (i = 0; i < nseq; i++) {
-        s = (dicts->s[i].len - 1) / HIC_WINDOW_SIZE + 1;
+        s = seq_nwin_ceil(tl[i], HIC_WINDOW_SIZE);
+        woff[i] = nwtot;
+        nwtot += s;
         if (s > mseq) mseq = s;
     }
+    woff[nseq] = nwtot;
 
     // allocate memory
     MYCALLOC(tcnts, novl);
     MYCALLOC(wcnts, mseq);
+    MYCALLOC(wincnt, MAX(nwtot, 1));
     MYCALLOC(index, nseq);
     MYCALLOC(hcnts, nseq);
     MYCALLOC(hcnts_beg, nseq);
@@ -937,7 +904,7 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     MYCALLOC(sords, nseq);
     MYCALLOC(ridx, nseq);
 
-    if (tcnts == NULL || wcnts == NULL || index == NULL || 
+    if (tcnts == NULL || wcnts == NULL || wincnt == NULL || index == NULL ||
         hcnts == NULL || hcnts_beg == NULL || hcnts_end == NULL ||
         clens == NULL || clens_beg == NULL || clens_end == NULL ||
         tlens == NULL || tlens_beg == NULL || tlens_end == NULL ||
@@ -946,7 +913,7 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
 
     // build overlap index for quick search
     // overlaps are sorted by abseqs
-    a = ovls->aread;
+    a = novl > 0 ? (int) ovls->aread : 0;
     for (i = 1, j = 0; i < novl; i++) {
         if (ovls[i].aread != a) {
             index[a] = (uint64) j << 32 | (i - j);
@@ -954,18 +921,78 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
             j = i;
         }
     }
-    index[a] = (uint64) j << 32 | (i - j);
+    if (novl > 0)
+        index[a] = (uint64) j << 32 | (i - j);
 
-    // build hic index for quick search
-    nidx = 0;
-    hidx = build_hidx(hics, nhic, &nidx);
+    /*** pass 1: statistics, intra distances, per-window inter counts, covered windows ***/
+    hic_stats_init(&hst, tl, nseq, HIC_WINDOW_SIZE);
+    kv_init(rngs);
+    kv_resize(range_t, rngs, 1<<20);
+    // inter blocks of a row become runs of consecutive apos ([beg, end) ranges), as in v1;
+    // a row's ranges are merged when the row ends, or earlier if there are very many
+#define PASS1_ROW_END() do { \
+        if (ropen) { rngs.a[ri].end = ++p; ropen = 0; } \
+        n = merge_ranges(rngs.a + rb0, (int) (rngs.n - rb0), 0); \
+        ridx[cur] = (uint64) rb0 << 32 | n; \
+        rngs.n = rb0 + n; \
+        hic_stats_row_end(&hst, cur); \
+    } while (0)
 
-    // estimate Wend
-    for (i = 0; i < nhic; i++) {
-        if (hics[i].aseq != hics[i].bseq)
-            continue;
-        wcnts[hics[i].bpos-hics[i].apos] += hics[i].nhic;
+    cur = curb = -1;
+    ropen = p = 0;
+    rb0 = ri = 0;
+    hic_stream_rewind(&hs);
+    while ((m = hic_stream_read(&hs, &h)) > 0) {
+        for (k = 0; k < m; k++, h++) {
+            if (h->aseq != cur) {
+                if (cur >= 0) PASS1_ROW_END();
+                cur = h->aseq;
+                curb = -1;
+                rb0 = rngs.n;
+            }
+            hic_stats_add(&hst, cur, h);
+            if (h->bseq == cur) {
+                // intra links: distance histogram for the terminal window size
+                wcnts[h->bpos - h->apos] += h->nhic;
+                if (ropen) { rngs.a[ri].end = ++p; ropen = 0; }
+                curb = cur;
+                continue;
+            }
+            hcnts[cur] += h->nhic;
+            wincnt[woff[cur] + h->apos] += h->nhic;
+            if (h->bseq != curb) {
+                // first record of an inter block
+                if (ropen) rngs.a[ri].end = ++p;
+                curb = h->bseq;
+                kv_pushp(range_t, rngs, &rng);
+                ri = rngs.n - 1;
+                p = h->apos;
+                rng->beg = p;
+                ropen = 1;
+            } else if (h->apos != ++p) {
+                rngs.a[ri].end = p;
+                kv_pushp(range_t, rngs, &rng);
+                ri = rngs.n - 1;
+                p = h->apos;
+                rng->beg = p;
+                if (ri - rb0 > RNG_COMPACT) {
+                    // merge the completed ranges of this row; keep the open one last
+                    range_t open = rngs.a[ri];
+                    n = merge_ranges(rngs.a + rb0, (int) (ri - rb0), 0);
+                    rngs.a[rb0 + n] = open;
+                    ri = rb0 + n;
+                    rngs.n = ri + 1;
+                }
+            }
+        }
     }
+    if (cur >= 0) PASS1_ROW_END();
+#undef PASS1_ROW_END
+
+    srngs = rngs.a;
+    hic_linkage_stats(&hst);
+    
+    // estimate Wend
     acnt = tcnt = 0;
     for (i = 0; i < mseq; i++)
         tcnt += wcnts[i];
@@ -985,58 +1012,26 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     fprintf(stderr, "[M::%s] using hic window size: %d bp\n", __func__, HIC_WINDOW_SIZE);
     fprintf(stderr, "[M::%s] using terminal window: %d kb\n", __func__, Wend * HIC_WINDOW_SIZE / 1000);
 
-    // collect windows covered by hic links
-    kv_init(rngs);
-    kv_resize(range_t, rngs, 1<<20);
-    a = hidx[0].a;
-    b = rngs.n;
-    a_wl = dicts->s[a].len / HIC_WINDOW_SIZE;
-    for (i = 0; i <= nidx; i++) {
-        if (i == nidx || hidx[i].a != a) {
-            p = merge_ranges(rngs.a + b, rngs.n - b, 0);
-            ridx[a] = (uint64) b << 32 | p;
-            rngs.n = b + p;
-
-            if (i == nidx) break;
-            a = hidx[i].a;
-            b = rngs.n;
-            a_wl = dicts->s[a].len / HIC_WINDOW_SIZE;
+    // inter links in the terminal windows of each sequence
+    for (i = 0; i < nseq; i++) {
+        a_wl = seq_nwin_floor(tl[i], HIC_WINDOW_SIZE);
+        w = seq_nwin_ceil(tl[i], HIC_WINDOW_SIZE);
+        for (j = 0; j < w; j++) {
+            if (j < Wend)
+                hcnts_beg[i] += wincnt[woff[i] + j];
+            if (j >= a_wl - Wend)
+                hcnts_end[i] += wincnt[woff[i] + j];
         }
-        if (a == hidx[i].b)
-            continue;
-        s = hidx[i].s;
-        e = hidx[i].e;
-        kv_pushp(range_t, rngs, &rng);
-        p = hics[s].apos;
-        rng->beg = p;
-        hcnts[a] += hics[s].nhic;
-        if (hics[s].apos < Wend)
-            hcnts_beg[a] += hics[s].nhic;
-        if (hics[s].apos >= a_wl - Wend)
-            hcnts_end[a] += hics[s].nhic;
-        for (j = s + 1; j < e; j++) {
-            if (hics[j].apos != ++p) {
-                rng->end = p;
-                kv_pushp(range_t, rngs, &rng);
-                p = hics[j].apos;
-                rng->beg = p;
-            }
-            hcnts[a] += hics[j].nhic;
-            if (hics[j].apos < Wend)
-                hcnts_beg[a] += hics[j].nhic;
-            if (hics[j].apos >= a_wl - Wend)
-                hcnts_end[a] += hics[j].nhic;
-        }
-        rng->end = ++p;
     }
-    srngs = rngs.a;
+    free(wincnt);
+    free(woff);
 
     // collect stats
     stot = htot = 0;
     for (i = 0; i < nseq; i++) {
-        a_wl = dicts->s[i].len / HIC_WINDOW_SIZE;
+        a_wl = seq_nwin_floor(tl[i], HIC_WINDOW_SIZE);
         a_wl = MIN(a_wl, Wend);
-        b_wl = dicts->s[i].len / HIC_WINDOW_SIZE - Wend;
+        b_wl = seq_nwin_floor(tl[i], HIC_WINDOW_SIZE) - Wend; // signed: may be < 0
         b_wl = MAX(b_wl, 0);
         rng = srngs + (ridx[i] >> 32);
         p = (uint32) ridx[i];
@@ -1081,25 +1076,25 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
             if (sords[i].event * 0.6745 > MAX_MODIFIED_Z * median)
                 smark[sords[i].which] = 1;
     }
-    
+
     // pre-compute trans overlaps
     for (i = 0; i < novl; i++)
         tcnts[i] = (ovl_cnt_t) {
-            i, 
-            ovls[i].bread, 
-            ovls[i].bbpos / HIC_WINDOW_SIZE, 
-            ovls[i].bepos / HIC_WINDOW_SIZE, 
+            i,
+            ovls[i].bread,
+            ovls[i].bbpos / HIC_WINDOW_SIZE,
+            ovls[i].bepos / HIC_WINDOW_SIZE,
             ovls[i].del ? -1 : 0 // mark deleted overlaps here
         };
     // sort by b so we can do a linear scan to compute all trans
     qsort(tcnts, novl, sizeof(ovl_cnt_t), ovl_cnt_b_cmpfunc);
-    b = tcnts[0].b;
-    for (i = j = 0; i <= novl; i++) {
-        if (i == novl || tcnts[i].b != b) {
-            count_olaps(srngs + (ridx[b] >> 32), (uint32) ridx[b], tcnts + j, i - j);
+    a = novl > 0 ? tcnts[0].b : 0;
+    for (i = j = 0; novl > 0 && i <= novl; i++) {
+        if (i == novl || tcnts[i].b != a) {
+            count_olaps(srngs + (ridx[a] >> 32), (uint32) ridx[a], tcnts + j, i - j);
             if (i == novl) break;
             j = i;
-            b = tcnts[j].b;
+            a = tcnts[j].b;
         }
     }
     // sort it back so will share index with the original overlaps
@@ -1107,7 +1102,7 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
     // count for each sequence
     for (i = 0; i < nseq; i++) {
         n = (uint32) index[i];
-        w = dicts->s[i].len / HIC_WINDOW_SIZE;
+        w = seq_nwin_floor(tl[i], HIC_WINDOW_SIZE);
         oc = tcnts + (index[i]>>32);
         tlens[i] = count_trans_olaps(oc, n);
         tlens_beg[i] = tlens_end[i] = 0;
@@ -1121,109 +1116,68 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
         }
     }
 
-    // calculate hic linkages
-    kv_init(hlks);
-    kv_resize(hlk_t, hlks, 1<<20);
-    for (i = 0; i < nidx; i++) {
-        idx = hidx + i;
-        a = idx->a;
-        b = idx->b;
-        if (a >= b || smark[a] || smark[b])
-            continue;
-        if (find_b_overlap(ovls + (index[a] >> 32), (uint32) index[a], b))
-            continue; // skip overlapped sequences
+    /*** pass 2: calculate hic linkages from the terminal windows of each row ***/
+    rblk_t *bk;
+    MYBZERO(&ctx, 1);
+    ctx.tl = tl;
+    ctx.Wend = Wend;
+    ctx.smark = smark;
+    ctx.index = index;
+    ctx.ovls = ovls;
+    ctx.clens_beg = clens_beg; ctx.clens_end = clens_end;
+    ctx.tlens_beg = tlens_beg; ctx.tlens_end = tlens_end;
+    ctx.hcnts_beg = hcnts_beg; ctx.hcnts_end = hcnts_end;
+    ctx.htot = htot;
+    kv_init(ctx.pend);
+    kv_init(ctx.hlks);
+    kv_resize(hlk_t, ctx.hlks, 1<<20);
+    MYMALLOC(ctx.phead, MAX(nseq, 1));
+    if (ctx.phead == NULL) mem_alloc_error("pair queue");
+    for (i = 0; i < nseq; i++) ctx.phead[i] = -1;
+    kv_init(row.h);
+    kv_init(row.blk);
 
-        // check four beg/end recombinations to find the one with the most cis links
-        a_wl = dicts->s[a].len / HIC_WINDOW_SIZE;
-        b_wl = dicts->s[b].len / HIC_WINDOW_SIZE;
-        a_st = (a_wl <= Wend);
-        b_st = (b_wl <= Wend);
-        best_ea = best_eb = 0;
-        cish_ab = -1;
-        for (ea = 0; ea <= (a_st ? 0 : 1); ea++) {
-            if (ea == 0) { 
-                ea_wb = 0;
-                ea_we = MIN(a_wl, Wend);
-            } else {
-                ea_wb = a_wl - Wend;
-                ea_we = a_wl;
-            }
-            for (eb = 0; eb <= (b_st ? 0 : 1); eb++) {
-                if (eb == 0) {
-                    eb_wb = 0;
-                    eb_we = MIN(b_wl, Wend);
-                } else {
-                    eb_wb = b_wl - Wend;
-                    eb_we = b_wl;
+    cur = -1;
+    t_beg = t_lo = a_wl = 0;
+    hic_stream_rewind(&hs);
+    while ((m = hic_stream_read(&hs, &h)) > 0) {
+        for (k = 0; k < m; k++, h++) {
+            if (h->aseq != cur) {
+                if (cur >= 0)
+                    hlink_row(&ctx, &row);
+                for (a = cur + 1; a < h->aseq; a++) {
+                    // a sequence without links still completes the pairs waiting for it
+                    row.a = a; row.h.n = row.blk.n = 0;
+                    hlink_row(&ctx, &row);
                 }
-                n = count_cis_links(hics, idx->s, idx->e, ea_wb, ea_we - 1, eb_wb, eb_we - 1);
-                if (n > cish_ab) {
-                    cish_ab = n;
-                    best_ea = ea;
-                    best_eb = eb;
-                }
+                cur = h->aseq;
+                row.a = cur; row.h.n = row.blk.n = 0;
+                a_wl = seq_nwin_floor(tl[cur], HIC_WINDOW_SIZE);
+                t_beg = MIN(a_wl, Wend);      // [0, t_beg): beginning window
+                t_lo = a_wl - Wend;           // [t_lo, a_wl): end window
+            }
+            if (row.blk.n == 0 || row.blk.a[row.blk.n - 1].b != h->bseq) {
+                kv_pushp(rblk_t, row.blk, &bk);
+                *bk = (rblk_t) {h->bseq, (int64) row.h.n, (int64) row.h.n};
+            }
+            if (h->apos < t_beg || (h->apos >= t_lo && h->apos < a_wl)) {
+                kv_push(hic_t, row.h, *h);
+                row.blk.a[row.blk.n - 1].e = row.h.n;
             }
         }
-        // set final end window ranges
-        if (best_ea == 0) { 
-            a_wb = 0;
-            a_we = MIN(a_wl, Wend);
-        } else {
-            a_wb = a_wl - Wend;
-            a_we = a_wl;
-        }
-        if (best_eb == 0) { 
-            b_wb = 0;
-            b_we = MIN(b_wl, Wend);
-        } else {
-            b_wb = b_wl - Wend;
-            b_we = b_wl;
-        }
-
-        if (cish_ab < MIN_CIS_HLINK)
-            continue;
-
-        cisl_a   = best_eb == 0? clens_beg[b] : clens_end[b];
-        cisl_b   = best_ea == 0? clens_beg[a] : clens_end[a];
-        transl_a = best_eb == 0? tlens_beg[b] : tlens_end[b];
-        transl_b = best_ea == 0? tlens_beg[a] : tlens_end[a];
-        transh_a = count_trans_links(hics, hidx, nidx, a, a_wb, a_we - 1,
-            ovls + (index[b]>>32), (uint32) index[b], b_wb, b_we);
-        transh_b = count_trans_links(hics, hidx, nidx, b, b_wb, b_we - 1,
-            ovls + (index[a]>>32), (uint32) index[a], a_wb, a_we);
-
-        hc_a = (best_ea == 0) ? hcnts_beg[a] : hcnts_end[a];
-        hc_b = (best_eb == 0) ? hcnts_beg[b] : hcnts_end[b];
-        p1 = calculate_poisson_pvalue(cish_ab, (double) hc_a * hc_b / htot);
-
-        p2 = (cisl_a + transl_a > 0)
-             ? calculate_binomial_pvalue(cish_ab, cish_ab + transh_a, (double) cisl_a / (cisl_a + transl_a))
-             : 1.0;
-        p3 = (cisl_b + transl_b > 0)
-             ? calculate_binomial_pvalue(cish_ab, cish_ab + transh_b, (double) cisl_b / (cisl_b + transl_b))
-             : 1.0;
-        
-        p_val = p1;
-        p_val = MAX(p_val, p2);
-        p_val = MAX(p_val, p3);
-
-        cis_l = 2.0 * cisl_a * cisl_b / (cisl_a + cisl_b);
-        //cis_l = sqrt(cisl_a) * sqrt(cisl_b);
-        d_val = cish_ab / sqrt(cisl_a) / sqrt(cisl_b);
-
-        kv_push(hlk_t, hlks, ((hlk_t) {a, b, cis_l, d_val, p_val}));
-
-#ifdef DEBUG_HIC_LINKAGE
-        fprintf(stdout, "%s\t%d\t%lld\t%s\t%d\t%lld\t|\t%12.3f\t%12.3f|\t%lld\t%lld\t%lld\t%lld\t|\t%lld\t%lld\t%lld\t%lld\t|\t%.3e\t%.3e\t%.3e\t|\t%.3e\tPG:A:%c\n", 
-            dicts->s[a].name, clens[a], hcnts[a], 
-            dicts->s[b].name, clens[b], hcnts[b],
-            cis_l, d_val,
-            cisl_a, cish_ab, transl_a, transh_a, 
-            cisl_b, cish_ab, transl_b, transh_b,
-            p1, p2, p3, p_val,
-            PG_HIC);
-#endif
     }
+    if (cur >= 0)
+        hlink_row(&ctx, &row);
+    for (a = cur + 1; a < nseq; a++) {
+        row.a = a; row.h.n = row.blk.n = 0;
+        hlink_row(&ctx, &row);
+    }
+    hic_stream_close(&hs);
+    kv_destroy(row.h);
+    kv_destroy(row.blk);
+    kv_destroy(ctx.pend);
+    free(ctx.phead);
+    hlks.n = ctx.hlks.n; hlks.m = ctx.hlks.m; hlks.a = ctx.hlks.a;
 
     nhlk = hlks.n;
     if (!nhlk) {
@@ -1257,16 +1211,12 @@ static hlk_t *build_hic_linkage_map(const char *hic_bfile, int min_qual, sdict_t
 
     // sort by sequence ids
     qsort(hlks.a, nhlk, sizeof(hlk_t), hlk_abseq_cmpfunc);
-    
+
     MYREALLOC(hlks.a, nhlk);
     if (_nhlk) *_nhlk = nhlk;
 
-    // run tests
-    //test_hic_linkage_map(hlks.a, nhlk, ovls, novl, dicts);
-
 cleanup:
-    free(hics);
-    free(hidx);
+    free(tl);
     free(ridx);
     free(smark);
     free(clens);
@@ -2681,7 +2631,6 @@ typedef struct {
     ho_est_t *est; int64 est_cap;
 } ho_ctx_t;
 
-#define HO_NAME(M, c) ((M)->dicts->s[(M)->gid[c]].name)
 #define HO_ENS(cx, f, n) do { \
     if ((int64)(n) > (cx)->f##_cap) { \
         (cx)->f##_cap = (int64)(n); kroundup64((cx)->f##_cap); \
@@ -4097,7 +4046,7 @@ static void build_haplotype_order(scf_block_t *blks, int nblk, ovl_t *ovls, uint
             cx.hap[j] = (int8) haps[a].hap;
         }
 
-        /* one record per sequence pair: the direction with name(a) < name(b) */
+        /* one record per sequence pair: the direction with (a) < (b) */
         cx.E.n = 0;
         for (j = 0; j < ns; j++) {
             const ovl_t *ov = ovls + (index[cx.gid[j]] >> 32);
@@ -4107,7 +4056,7 @@ static void build_haplotype_order(scf_block_t *blks, int nblk, ovl_t *ovls, uint
                 ho_e_t e;
                 if (ov->del) continue;
                 ib = smap[ov->bread];
-                if (ib < 0 || strcmp(HO_NAME(&cx, j), HO_NAME(&cx, ib)) >= 0) continue;
+                if (ib < 0 || ov->aread >= ov->bread) continue;
                 e.a = j; e.b = ib; e.raw = (ov->arev != ov->brev); e.o = ov;
                 kv_push(ho_e_t, cx.E, e);
             }

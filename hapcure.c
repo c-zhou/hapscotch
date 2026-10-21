@@ -109,6 +109,7 @@ int main(int argc, char *argv[])
     sdict_t *dicts;
     hic_t *hics;
     aln_t *alns;
+    hic_store_t hstore;
     fileType_t f_type;
     FILE *fo;
     ec_pos_t *calls;
@@ -203,11 +204,12 @@ int main(int argc, char *argv[])
     }
 
     // call error correction positions from Hi-C
+    MYBZERO(&hstore, 1);
     nhic = 0;
-    hics = read_hic_from_binary(hic_bfile, dicts, ec_conf.bin_size, 0, &nhic);
+    hics = read_hic_extern(hic_bfile, dicts, NULL, ec_conf.bin_size, 0, HIC_INTRA, 0, &nhic, &hstore);
     ncall = 0;
     calls = ec_call_breaks(hics, nhic, dicts, &ncall);
-    free(hics);
+    hic_store_release(&hstore, hics);
     
     // call error correction positions from palindromes
     naln = 0;

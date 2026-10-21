@@ -48,10 +48,15 @@
 #define REPORT_EPOC 100000000
 
 typedef enum { NOSET, BED, BAM, BIN, PA5, ONE } fileType_t;
+typedef enum { HIC_ALL = 0, HIC_INTRA = 1, HIC_INTER = 2 } hicType_t;
 
 extern const char *fileTypeNames[6];
 
 extern int HIC_WINDOW_SIZE;
+
+extern int64 HIC_MEM_LIMIT;
+extern int   HIC_THREADS;
+extern char *HIC_TMP_DIR;
 
 typedef struct {
     int aseq, apos;
@@ -59,16 +64,40 @@ typedef struct {
     int nhic;
 } hic_t;
 
+// external-memory loader
+typedef struct {
+    void *map;       // mmap base, NULL if the array lives on the heap
+    size_t map_len;
+    char *path;      // backing file, if it could not be unlinked yet
+    FILE *fp;        // stream mode: the open sorted temp file
+} hic_store_t;
+
+typedef struct {
+    hic_t *arr;          // in-memory links (owned), NULL in file mode
+    int64 n;             // number of links
+    hic_store_t store;   // file mode: the sorted temp file
+    hic_t *buf;          // file mode: read buffer
+    int64 nread, pos;
+} hic_stream_t;
+
 #ifdef __cplusplus 
 extern "C" {
 #endif
 
 char *write_binary_hic_data(char *f, fileType_t f_type, sdict_t *dicts, int read_len, char *out);
 char *write_binary_hic_data_multi(char **files, int n_files, fileType_t f_type, sdict_t *dicts, int read_len, char *out);
-hic_t *read_hic_from_binary(char *bf, sdict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic);
-hic_t *read_hic_from_binary_sd_conversion(char *hic_bfile, asm_dict_t *dicts, int bin_size, uint8 min_qual, int64 *_nhic);
-void write_binary_hic_data_pseudo_yahs(char *bf, sdict_t *dicts, asm_dict_t *break_dict, int32 **smap, char *out);
+void write_binary_hic_data_pseudo_yahs(char *bf, sdict_t *dicts, asm_dict_t *adict, int32 **smap, char *out);
 int match_binary_file_sdict(char *f, sdict_t *dict);
+hic_t *read_hic_inmem(char *hic_bfile, sdict_t *dicts, asm_dict_t *adict, int bin_size, uint8 min_qual,
+    hicType_t type, int symm, int64 *_nhic);
+hic_t *read_hic_extern(char *hic_bfile, sdict_t *dicts, asm_dict_t *adict, int bin_size, uint8 min_qual,
+    hicType_t type, int symm, int64 *_nhic, hic_store_t *store);
+int64 read_hic_extern_stream(char *hic_bfile, sdict_t *dicts, asm_dict_t *adict, int bin_size, uint8 min_qual,
+    hicType_t type, int symm, hic_stream_t *st);
+int64 hic_stream_read(hic_stream_t *st, hic_t **h);
+void hic_stream_rewind(hic_stream_t *st);
+void hic_stream_close(hic_stream_t *st);
+void hic_store_release(hic_store_t *store, hic_t *hics);
 
 #ifdef __cplusplus
 }

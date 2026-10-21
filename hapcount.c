@@ -118,7 +118,7 @@ strerror(errno));
         fprintf(fp_help, "    -g FILE                BUSCO gene full table (for statistics only)\n");
         fprintf(fp_help, "    -a FILE                AGP file of assembly error corrected sequences\n");
         fprintf(fp_help, "    -D                     input alignments are not dual mappings\n");
-        fprintf(fp_help, "      --max-ploidy INT     upper limit of genome ploidy number to consider [%d]\n", MAX_PLOIDY_NUMBER);
+        fprintf(fp_help, "    -P INT                 upper limit of genome ploidy number to consider [%d]\n", MAX_PLOIDY_NUMBER);
         fprintf(fp_help, "    -t INT                 maximum number of threads to use [%d]\n", n_threads);
         fprintf(fp_help, "    -o STR                 output file name\n");
         fprintf(fp_help, "    -v INT                 verbose level [%d]\n", VERBOSE);

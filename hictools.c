@@ -46,6 +46,16 @@ int VERBOSE = 0;
 
 static double ht_realtime0;
 
+static int64 parse_num(const char *str)
+{
+    char *p;
+    double x = strtod(str, &p);
+    if (*p == 'G' || *p == 'g') x *= 1e9;
+    else if (*p == 'M' || *p == 'm') x *= 1e6;
+    else if (*p == 'K' || *p == 'k') x *= 1e3;
+    return (int64) (x + .499);
+}
+
 /***********************************************************************************
  * hictools convert                                                                *
  *                                                                                 *
@@ -198,10 +208,11 @@ static int main_convert(int argc, char *argv[])
 
 static int make_contact_map(char *bin_file, char *idx_file, char *agp_file, int bin_size, int min_qual, FILE *fo)
 {
+    hic_store_t hstore;
     asm_dict_t *dicts;
     sdict_t *sdicts;
     hic_t *hics;
-    int64 i, j, slen, nhic, cnts;
+    int64 i, slen, nhic, cnts;
 
     sdicts = make_sdict_from_index(idx_file, 0);
     dicts = agp_file? make_asm_dict_from_agp(sdicts, agp_file, 1) : make_asm_dict_from_sdict(sdicts);
@@ -209,14 +220,15 @@ static int make_contact_map(char *bin_file, char *idx_file, char *agp_file, int 
     /* total scaffold coordinate space = sequence bases + gap bases,
      * matching what sd_coordinate_conversion(count_gap=1) uses          */
     slen = 0;
-    for (j = 0; j < dicts->n; j++)
-        slen += (int64)(dicts->s[j].len + dicts->s[j].gap);
+    for (i = 0; i < dicts->n; i++)
+        slen += (int64)(dicts->s[i].len + dicts->s[i].gap);
 
     if (bin_size <= 0)
         bin_size = 1 + (MAX(slen, 1) - 1) / (-bin_size);
 
+    MYBZERO(&hstore, 1);
     nhic = 0;
-    hics = read_hic_from_binary_sd_conversion(bin_file, dicts, bin_size, (uint8)min_qual, &nhic);
+    hics = read_hic_extern(bin_file, NULL, dicts, bin_size, (uint8)min_qual, HIC_ALL, 0, &nhic, &hstore);
 
     cnts = 0;
     for (i = 0; i < nhic; i++) cnts += hics[i].nhic;
@@ -232,25 +244,23 @@ static int make_contact_map(char *bin_file, char *idx_file, char *agp_file, int 
     fprintf(fo, "# number contacts: %lld\n", nhic);
 
     /* S lines: one per scaffold/contig in index order */
-    for (j = 0; j < dicts->n; j++)
-        fprintf(fo, "S\t%s\t%llu\n", dicts->s[j].name,
-                (unsigned long long)(dicts->s[j].len + dicts->s[j].gap));
+    for (i = 0; i < dicts->n; i++)
+        fprintf(fo, "S\t%s\t%llu\n", dicts->s[i].name,
+                (unsigned long long)(dicts->s[i].len + dicts->s[i].gap));
 
     /* B line: bin size in bp */
     fprintf(fo, "B\t%d\n", bin_size);
 
     /* C lines: sparse contact matrix entries */
-    if (hics) {
-        for (i = 0; i < nhic; i++)
-            fprintf(fo, "C\t%d\t%d\t%d\t%d\t%d\n",
-                    hics[i].aseq, hics[i].apos,
-                    hics[i].bseq, hics[i].bpos,
-                    hics[i].nhic);
-        free(hics);
-    }
+    for (i = 0; i < nhic; i++)
+        fprintf(fo, "C\t%d\t%d\t%d\t%d\t%d\n",
+                hics[i].aseq, hics[i].apos,
+                hics[i].bseq, hics[i].bpos,
+                hics[i].nhic);
 
     asm_destroy(dicts);
     sd_destroy(sdicts);
+    hic_store_release(&hstore, hics);
     return 0;
 }
 
@@ -274,6 +284,9 @@ static void print_help_prepare(FILE *fp)
     fprintf(fp, "                   bin size = ceil(genome_length / n); preferred over -s\n");
     fprintf(fp, "    -s INT         explicit bin size in bp (overrides -n)\n");
     fprintf(fp, "    -q INT         minimum mapping quality [0]\n");
+    fprintf(fp, "    -t INT         number of threads [%d]\n", HIC_THREADS);
+    fprintf(fp, "    -m NUM         maximum memory limit [%lldGB]\n", HIC_MEM_LIMIT >> 30);
+    fprintf(fp, "    -T STR         temporary directory for intermediate files [%s]\n", HIC_TMP_DIR);
     fprintf(fp, "    -o FILE        output file [stdout]\n");
     fprintf(fp, "    -v INT         verbose level [0]\n");
     fprintf(fp, "    -h, --help     print this help\n");
@@ -286,7 +299,7 @@ static void print_help_prepare(FILE *fp)
 
 static int main_prepare(int argc, char *argv[])
 {
-    const char *opt_str = "a:n:s:q:o:v:Vh";
+    const char *opt_str = "a:n:m:s:q:o:v:t:T:Vh";
     ketopt_t opt = KETOPT_INIT;
     int c, min_qual;
     int n_bins, bin_size;
@@ -312,6 +325,12 @@ static int main_prepare(int argc, char *argv[])
             bin_size = atol(opt.arg);
         } else if (c == 'q') {
             min_qual = atoi(opt.arg);
+        } else if (c == 't') {
+            HIC_THREADS = atoi(opt.arg);
+        } else if (c == 'm') {
+            HIC_MEM_LIMIT = parse_num(opt.arg);
+        } else if (c == 'T') {
+            HIC_TMP_DIR = opt.arg;
         } else if (c == 'o') {
             out = opt.arg;
         } else if (c == 'v') {

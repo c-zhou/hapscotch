@@ -61,15 +61,15 @@ typedef double             float64;
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 #define MIN_MAX(x, min, max) MIN((MAX((x), (min))), (max))
 
-#define MYMALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc(sizeof(*(ptr)) * (len)))
-#define MYCALLOC(ptr, len) ((ptr) = (__typeof__(ptr))calloc((len), sizeof(*(ptr))))
-#define MYREALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), sizeof(*(ptr)) * (len)))
-#define MYBZERO(ptr, len) memset((ptr), 0, sizeof(*(ptr)) * (len))
-#define MYBONE(ptr, len) memset((ptr), 0xff, sizeof(*(ptr)) * (len))
+#define MYMALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc(sizeof(*(ptr)) * ((size_t)(len))))
+#define MYCALLOC(ptr, len) ((ptr) = (__typeof__(ptr))calloc(((size_t)(len)), sizeof(*(ptr))))
+#define MYREALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), sizeof(*(ptr)) * ((size_t)(len))))
+#define MYBZERO(ptr, len) memset((ptr), 0, sizeof(*(ptr)) * ((size_t)(len)))
+#define MYBONE(ptr, len) memset((ptr), 0xff, sizeof(*(ptr)) * ((size_t)(len)))
 #define MYEXPAND(a, m) do { \
     ++(m); \
     kroundup64((m)); \
-    MYREALLOC((a), (m)); \
+    MYREALLOC((a), ((size_t)(m))); \
 } while (0)
 
 #define strcasecmp(s1, s2) strcmp_case_insensitive(s1, s2)

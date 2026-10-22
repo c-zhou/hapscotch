@@ -27,11 +27,11 @@
 #ifndef VERSION_H_
 #define VERSION_H_
 
-#define HAPSCOTCH_VERSION "0.1"
-#define HAPCOUNT_VERSION  "0.1"
-#define HAPCURE_VERSION   "0.1"
-#define HICTOOLS_VERSION  "0.1"
-#define SEQTOOLS_VERSION  "0.1"
-#define ALNSPLIT_VERSION  "0.1"
+#define HAPSCOTCH_VERSION "0.3"
+#define HAPCOUNT_VERSION  "0.3"
+#define HAPCURE_VERSION   "0.3"
+#define HICTOOLS_VERSION  "0.3"
+#define SEQTOOLS_VERSION  "0.3"
+#define ALNSPLIT_VERSION  "0.3"
 
 #endif // VERSION_H_

@@ -177,8 +177,10 @@ def link_ref_genome(ctx: Ctx) -> Path:
 # command execution
 # --------------------------------------------------------------------------- #
 
-def run_cmd(cmd, log_path: Path, *, shell: bool = False, cwd: Optional[Path] = None) -> None:
-    """Run `cmd`, tee-ing stdout/stderr to log_path."""
+def run_cmd(cmd, log_path: Path, *, shell: bool = False, cwd: Optional[Path] = None,
+            env: Optional[dict] = None) -> None:
+    """Run `cmd`, tee-ing stdout/stderr to log_path. `env` adds to (does not replace)
+    the current environment for this command only."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     printable = cmd if isinstance(cmd, str) else " ".join(shlex.quote(str(c)) for c in cmd)
     _log(f"running: {printable}")
@@ -188,7 +190,8 @@ def run_cmd(cmd, log_path: Path, *, shell: bool = False, cwd: Optional[Path] = N
         lf.flush()
         try:
             proc = subprocess.run(
-                cmd, shell=shell, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT
+                cmd, shell=shell, cwd=cwd, stdout=lf, stderr=subprocess.STDOUT,
+                env=None if env is None else {**os.environ, **env},
             )
         except OSError as e:
             raise PipelineError(f"could not launch command: {printable}\n{e}") from e
@@ -596,11 +599,16 @@ def make_aln_plot(ctx: Ctx, args, seqaln: Path, agpec: Optional[Path], scf_agp: 
             ctx.logdir / "res.alnchain.log",
         )
         # ALNplot writes <pdf>.eps then converts it with [e]ps[to|2]pdf, and ps2pdf puts
-        # the PDF in the working directory - so run it from the PDF's own directory
+        # the PDF in the working directory - so run it from the PDF's own directory.
+        # ps2pdf also ignores the EPS bounding box and uses a default (Letter/A4) page,
+        # clipping the square plot; -dEPSCrop (via GS_OPTIONS, read by Ghostscript)
+        # crops the page to the bounding box as epstopdf does
+        gs_opts = " ".join(o for o in (os.environ.get("GS_OPTIONS", ""), "-dEPSCrop") if o)
         run_cmd(
             [ctx.alnplot_bin, "-L", "-G", "-n0", f"-T{ctx.threads}", f"-p:{pdf.name}",
              str(chain_aln.resolve()), str(seq_order.resolve()), str(seq_order.resolve())],
             ctx.logdir / "res.alnplot.log", cwd=pdf.parent,
+            env={"GS_OPTIONS": gs_opts},
         )
         pdf.with_suffix(".eps").unlink(missing_ok=True)
     finally:

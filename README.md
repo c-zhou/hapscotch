@@ -354,7 +354,8 @@ alnsplit -r -o genome_ec.1aln genome.fa.idx ctg.ec.agp genome.1aln
 ALNchain -ogenome_ec.chain.1aln genome_ec.1aln
 
 # we need ALNplot from the FASTGA package for plotting
-ALNplot -L -G -n0 -p:haps-all.scf.aln.pdf genome_ec.chain.1aln seq.order seq.order
+# GS_OPTIONS=-dEPSCrop keeps the plot square if ALNplot converts it with ps2pdf
+GS_OPTIONS=-dEPSCrop ALNplot -L -G -n0 -p:haps-all.scf.aln.pdf genome_ec.chain.1aln seq.order seq.order
 ```
 
 **Diagnostic Hi-C contact plots (optional):**

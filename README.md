@@ -131,14 +131,14 @@ Run `python3 scripts/run_pipeline.py -h` for the full option list.
 flowchart LR
     G[genome.fa] --> S1[seq_index]
     S1 --> S2[self_align]
-    S2 --> S6[hapscotch]
+    S2 --> S5[contig_ec]
     S1 -. Hi-C only .-> S3[hic_align]
-    S3 -.-> S4[hic_convert]
-    S4 -.-> S5[contig_ec]
-    S5 -.-> S6
+    S3 --> S4[hic_convert]
+    S4 --> S5
+    S5 --> S6[hapscotch]
     S6 -. Hi-C only .-> S7[yahs_scaffold]
     S6 --> S8[collect_results]
-    S7 -.-> S8
+    S7 --> S8
     S8 --> R[4.results]
 ```
 

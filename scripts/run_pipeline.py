@@ -18,10 +18,11 @@ exist; if so the step is skipped (logged as "[skip]"). Use --resume to continue
 a previous run from wherever it stopped (completed steps are skipped, nothing is
 rerun unnecessarily); --force to ignore existing outputs and rerun every step from
 scratch; or --force-from STEP to rerun a step and everything after it. If OUTDIR
-already exists, one of --resume/--force/--force-from is required (otherwise the
-pipeline refuses to run); conversely, those options require OUTDIR to already
-exist. The parameters of the run that created OUTDIR are recorded in
-OUTDIR/data/CMD; --resume/--force/--force-from are refused if the current
+already holds a previous run (OUTDIR/data/CMD exists), one of --resume/--force/
+--force-from is required (otherwise the pipeline refuses to run); conversely, those
+options require such a previous run. An existing OUTDIR without a previous run
+is used as is for a new run. The parameters of the run that created OUTDIR are recorded
+in OUTDIR/data/CMD; --resume/--force/--force-from are refused if the current
 parameters don't match that record.
 """
 import argparse
@@ -842,7 +843,13 @@ def main(argv=None) -> int:
     )
 
     resuming = bool(args.resume or args.force or args.force_from)
-    outdir_existed = outdir.exists()
+
+    # an existing OUTDIR without a parameter record (e.g. pre-created by a job
+    # runner) has never been used by a pipeline run, so it is treated as a new one
+    outdir_existed = (outdir / "data" / "CMD").exists()
+    if outdir.exists() and not outdir_existed and not resuming:
+        _log(f"output directory '{outdir}' exists but has no previous run record, "
+             f"starting a new run in it")
 
     if outdir_existed and not resuming:
         _log(f"error: output directory '{outdir}' already exists. Use --resume to "

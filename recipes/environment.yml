@@ -1,6 +1,6 @@
 # Sets up a conda environment with everything needed to build and run the
 # whole HapScotch pipeline (build toolchain + FastGA/minibwa/samtools/YaHS +
-# the Python packages used by scripts/hicmap.py). Does NOT build hapscotch
+# ghostscript for the alignment plot PDF + the Python packages used by scripts/hicmap.py). Does NOT build hapscotch
 # itself - after activating, still run `make` (and optionally `make install`)
 # as usual.
 #
@@ -26,7 +26,8 @@ dependencies:
   - cxx-compiler
   - git
   - samtools
-  - fastga
+  - fastga >=1.5.20260729   # FastGA v1.5.1, needed for ALNplot -G
   - bwa-mem2
   - minibwa
   - yahs
+  - ghostscript             # ps2pdf, used by ALNplot for PDF output

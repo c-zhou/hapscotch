@@ -29,7 +29,6 @@
 
 #include "ketopt.h"
 
-#include "paf.h"
 #include "hic.h"
 #include "busco.h"
 #include "sdict.h"
@@ -226,7 +225,7 @@ int main(int argc, char *argv[])
 
     if (argc == opt.ind || fp_help == stdout) {
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Usage: hapscotch [options] <genome.fa.[fai|idx]> <aln.paf[.gz]>\n");
+        fprintf(fp_help, "Usage: hapscotch [options] <genome.fa.[fai|idx]> <aln.[1aln|paf[.gz]]>\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -g FILE                BUSCO gene full table (for statistics only)\n");
         fprintf(fp_help, "    -a FILE                AGP file of assembly error corrected sequences\n");
@@ -274,7 +273,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -h, --help             print this help\n");
         fprintf(fp_help, "    -V, --version          show version number\n");
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Example: hapscotch -o hapscotch.out genome.fa.fai aln.paf\n");
+        fprintf(fp_help, "Example: hapscotch -o hapscotch.out genome.fa.fai aln.1aln\n");
         fprintf(fp_help, "         hapscotch -o hapscotch.out -c hic.bam genome.fa.fai aln.paf\n");
         fprintf(fp_help, "\n");
         return fp_help == stdout? 0 : 1;
@@ -356,7 +355,7 @@ int main(int argc, char *argv[])
 
     // read PAF files
     naln = 0;
-    alns = read_pafs(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, 0, &naln);
+    alns = read_alns(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, 0, &naln);
     
     // add dual alignments and sort by aread, abpos, aepos
     qsort(alns, naln, sizeof(aln_t), aln_coords_cmpfunc);
@@ -436,7 +435,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-static void contig_error_correction(char *hic_bfile, char *paf_file, sdict_t *dicts, int n_threads, char *agp_ec)
+static void contig_error_correction(char *hic_bfile, char *aln_file, sdict_t *dicts, int n_threads, char *agp_ec)
 {
     hic_store_t hstore;
     ec_pos_t *calls;
@@ -457,7 +456,7 @@ static void contig_error_correction(char *hic_bfile, char *paf_file, sdict_t *di
     
     // call error correction positions from palindromes
     naln = 0;
-    alns = read_pafs(&paf_file, 1, dicts, NULL, 0, 1, &naln);
+    alns = read_alns(&aln_file, 1, dicts, NULL, 0, 1, &naln);
     npali = 0;
     palis = aln_find_palindromes(alns, naln, dicts, ec_conf.pal_size, ec_conf.pal_dens, n_threads, &npali);
     free(alns); // no fragments to free

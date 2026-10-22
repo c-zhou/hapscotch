@@ -6,7 +6,7 @@
 
 HapScotch phases and scaffolds haplotypes in polyploid/multi-haplotype genome assemblies from all-vs-all sequence self-alignments, optionally refined with Hi-C data (contig error-correction and Hi-C guided scaffolding via [YaHS](https://github.com/c-zhou/yahs)).
 
-The repository builds five C programs, plus a Python script that runs the full pipeline end to end.
+The repository builds six C programs, plus a Python script that runs the full pipeline end to end.
 
 | Program | Purpose |
 |---|---|
@@ -15,7 +15,8 @@ The repository builds five C programs, plus a Python script that runs the full p
 | `hictools` | Hi-C alignment file processing |
 | `seqtools` | Sequence/AGP utilities |
 | `hapcount` | Standalone ploidy estimator |
-| `scripts/run_pipeline.py` | Driver script that runs the tools end to end |
+| `alnsplit` | Map alignments to error-corrected sequences |
+| `scripts/run_pipeline.py` | Script to run pipeline end to end |
 
 ## Table of Contents
 
@@ -75,7 +76,7 @@ python3 scripts/run_pipeline.py --help
 
 ### Docker / Singularity / Apptainer
 
-**Docker** — [`recipes/Dockerfile`](recipes/Dockerfile) builds an image with the full pipeline (all five binaries, `scripts/*.py`, and FastGA/bwa-mem2/minibwa/samtools/YaHS):
+**Docker** — [`recipes/Dockerfile`](recipes/Dockerfile) builds an image with the full pipeline (all six binaries, `scripts/*.py`, and FastGA/bwa-mem2/minibwa/samtools/YaHS):
 
 ```bash
 docker build -t hapscotch -f recipes/Dockerfile .
@@ -102,7 +103,7 @@ the `--seq-aln` and `--hic-aln` parameters.
 
 
 **Prerequisites:**
-- The five binaries above, either on `PATH` or pointed to with `--seqtools-bin` / `--hictools-bin` / `--hapscotch-bin` / `--hapcure-bin`
+- The six binaries above, either on `PATH` or pointed to with `--seqtools-bin` / `--hictools-bin` / `--hapscotch-bin` / `--hapcure-bin`
 - [YaHS](https://github.com/c-zhou/yahs) (`--yahs-bin`) — needed for Hi-C scaffolding
 - [FastGA](https://github.com/thegenemyers/FASTGA) (`--fastga-bin`) — needed for sequence self-alignments
 - [bwa-mem2](https://github.com/bwa-mem2/bwa-mem2) (`--bwamem2-bin`) or [minibwa](https://github.com/lh3/minibwa) (`--minibwa-bin`) — needed for Hi-C alignments
@@ -171,7 +172,8 @@ Below is a summary table for the final outputs that can be found in folder `OUTD
 |7| `haps-all.scf.agp` | Scaffolds combining Hi-C — all haplotypes |
 |8| `haps-[1-9][0-9]*.scf.agp` | Scaffolds combining Hi-C — each haplotype |
 |9| `haps-[1-9][0-9]*.scf.fa.gz` | Scaffolds combining Hi-C — each haplotype |
-|10| `haps-all.scf.hic.png` / `.pdf` | Hi-C contact map for the scaffolded assembly |
+|10| `haps-all.scf.aln.pdf` | Sequence alignment for the scaffolded assembly |
+|11| `haps-all.scf.hic.png` / `.pdf` | Hi-C contact map for the scaffolded assembly |
 
 These files can be combined with `seqtools seq` to generate various FASTA outputs:
 
@@ -213,12 +215,15 @@ If you plan to use Hi-C phasing, it is highly recommended to also run hifiasm wi
 ### 2. Self-alignment
 
 ```bash
+FastGA -v -T8 -1:genome.1aln genome.fa
+
+# or a PAF output - not recommended
 FastGA -v -T8 -paf genome.fa >genome.paf
 ```
 
 Generates an all-vs-all sequence alignment with FastGA, used as input to `hapscotch`. You can gzip the output PAF to save space.
 
-The `scripts/selfaln.py` script wraps this step for the end-to-end pipeline. Since it can be time-consuming, it is recommended to run it yourself and pass the PAF[.gz] file to the pipeline with `--seq-aln` for better control.
+The `scripts/selfaln.py` script wraps this step for the end-to-end pipeline. Since it can be time-consuming, it is recommended to run it yourself and pass the 1aln/PAF[.gz] file to the pipeline with `--seq-aln` for better control.
 
 ### 3. (optional) Align Hi-C reads
 
@@ -289,15 +294,17 @@ Merges/converts Hi-C alignments from multiple libraries into a single binary fil
 ### 5. (optional) Contig error-correction from Hi-C signal
 
 ```bash
-hapcure -o ctg genome.fa.idx hicaln-ctg.bin
+hapcure -a genome.1aln -o ctg genome.fa.idx hicaln-ctg.bin
 ```
+
+The `-a` with genome alignment file asks `hapcure` to correct a very specific type of errors - palindromes - in the assembly, which is recommended.
 
 Produces `ctg.ec.agp`, which can be passed to `hapscotch` via `-a` option. By default, `hapscotch` runs error-correction automatically when `-a` is not given and `-c` (Hi-C data) is, unless you skip it explicitly with `-E`.
 
 ### 6. Haplotype binning/phasing
 
 ```bash
-hapscotch -o haps -a ctg.ec.agp -c hicaln-ctg.bin -Y genome.fa.idx genome.paf
+hapscotch -o haps -a ctg.ec.agp -c hicaln-ctg.bin -Y genome.fa.idx genome.1aln
 ```
 
 Bins sequences into haplotype groups and builds longer scaffolds using sequence overlaps. With `-c` (Hi-C reads), it also phases haplotypes to minimise inter-haplotype Hi-C signal.
@@ -333,6 +340,23 @@ seqtools hap -p 2 -o haps-2.scf.agp haps_scaffolds_final.agp haps.bbpos.txt
 seqtools seq -a genome.fa haps-2.scf.agp >haps-2.scf.fa
 ```
 
+**Diagnostic genome alignment plot (optional):**
+
+```bash
+# we generate a sequence order according to the AGP file
+awk '{if($5=="W") print "@"$6"_"$7"_"$8$9}' haps-all.scf.agp >seq.order
+
+# we need '-r' here to get the correct sequence names
+alnsplit -r -o genome_ec.1aln genome.fa.idx ctg.ec.agp genome.1aln
+
+# we need ALNchain from the FASTGA package for filtering
+# otherwise there will be way to many alignments to plot
+ALNchain -ogenome_ec.chain.1aln genome_ec.1aln
+
+# we need ALNplot from the FASTGA package for plotting
+ALNplot -L -G -n0 -p:haps-all.scf.aln.pdf genome_ec.chain.1aln seq.order seq.order
+```
+
 **Diagnostic Hi-C contact plots (optional):**
 
 ```bash
@@ -345,5 +369,25 @@ python3 scripts/hicmap.py --png haps-all.scf.hic.png --pdf haps-all.scf.hic.pdf 
 **`hapcount`** is a standalone command-line tool for ploidy estimation, and is also used internally by `hapscotch`:
 
 ```bash
-hapcount -o out genome.fa.idx genome.paf
+hapcount -o out genome.fa.idx genome.1aln
 ```
+
+## Reference
+
+Chenxi Zhou. (2026). c-zhou/hapscotch: Hapscotch-0.1 (Version 0.1) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23546384
+
+*Below are references for the tools used in the pipeline. Please also consider including them if any particular modules are used.*
+
+Zhou, C., McCarthy, S. A., & Durbin, R. (2023). YaHS: yet another Hi-C scaffolding tool. Bioinformatics, 39(1), btac808.
+
+Myers, G., Durbin, R., & Zhou, C. (2025). FastGA: fast genome alignment. Bioinformatics Advances, 5(1), vbaf238.
+
+Vasimuddin, M., Misra, S., Li, H., & Aluru, S. (2019, May). Efficient architecture-aware acceleration of BWA-MEM for multicore systems. In 2019 IEEE international parallel and distributed processing symposium (IPDPS) (pp. 314-324). IEEE.
+
+Li, H., Handsaker, B., Wysoker, A., Fennell, T., Ruan, J., Homer, N., ... & 1000 Genome Project Data Processing Subgroup. (2009). The sequence alignment/map format and SAMtools. bioinformatics, 25(16), 2078-2079.
+
+Parallelizing the dual revised simplex method Q. Huangfu and J. A. J. Hall Mathematical Programming Computation, 10 (1), 119-142, 2018. DOI: 10.1007/s12532-017-0130-5.
+
+
+
+

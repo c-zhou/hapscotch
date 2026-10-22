@@ -4,7 +4,7 @@ CPPFLAGS=
 INCLUDES=
 LDFLAGS=
 OBJS=
-PROG=       hapscotch hapcount hapcure hictools seqtools
+PROG=       hapscotch hapcount hapcure hictools seqtools alnsplit
 PROG_EXTRA=
 LIBS=       -lm -lz -lpthread
 DESTDIR=    ~/bin
@@ -77,7 +77,7 @@ $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MINOR): $(LIB_DIR)/libhighs.$(LIBHiGHS_EXT_MA
 hapscotch: hapscotch.o alnio.o busco.o overlap.o ploidy.o hap.o hic.o sdict.o paf.o ec.o range.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o | $(HiGHS_OBJS)
 	$(CXX) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) $^ -o $@ -L. $(R_PATH) $(HiGHS_LIBS) $(LIBS)
 
-hapcount: hapcount.o alnio.o busco.o overlap.o ploidy.o sdict.o paf.o range.o misc.o kthread.o kalloc.o kopen.o
+hapcount: hapcount.o alnio.o busco.o overlap.o ploidy.o sdict.o paf.o range.o ONElib.o misc.o kthread.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 hapcure: hapcure.o ec.o hic.o sdict.o alnio.o paf.o overlap.o cov.o bamlite.o ONElib.o misc.o kthread.o kalloc.o kopen.o
@@ -87,6 +87,9 @@ hictools: hictools.o hic.o sdict.o cov.o bamlite.o ONElib.o misc.o kalloc.o kope
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 seqtools: seqtools.o sdict.o bgzf.o misc.o kalloc.o kopen.o
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
+
+alnsplit: alnsplit.o sdict.o alnio.o paf.o overlap.o ONElib.o misc.o kthread.o kalloc.o kopen.o
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ -o $@ -L. $(LIBS)
 
 clean:

@@ -22,7 +22,7 @@
  * SOFTWARE.                                                                     *
  *********************************************************************************/
 
-// PAF alignment loading, with optional break-AGP coordinate remapping,
+// PAF and .1aln alignment loading, with optional break-AGP coordinate remapping,
 // shared by hapscotch.c and hapcount.c
 
 #ifndef ALNIO_H_
@@ -43,6 +43,15 @@ void validate_break_agp(asm_dict_t *bd);
 sdict_t *make_piece_sdict(asm_dict_t *bd);
 // read PAF file(s) into an aln_t array, remapping onto break-AGP pieces if break_dict is given
 aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int self_aln, int64 *_naln);
+// read .1aln file(s) into an aln_t array, remapping onto break-AGP pieces if break_dict is given
+// the GDB skeleton(s) must be included in the .1aln file
+aln_t *read_1aln(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int self_aln, int64 *_naln);
+// remap an alignment file (.1aln or PAF) onto the sequence pieces of a break AGP and write a new .1aln file to fo
+// the output carries a GDB skeleton of the pieces and empty trace points
+// pieces are named as in the AGP, or as "name_start_end" on the original sequence if raw_name is set
+int64 split_aln(char *fin, asm_dict_t *break_dict, int raw_name, FILE *fo);
+// read alignment file(s), PAF or .1aln (detected by file header), into an aln_t array
+aln_t *read_alns(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int dual_aln, int self_aln, int64 *_naln);
 
 #ifdef __cplusplus
 }

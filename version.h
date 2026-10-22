@@ -32,5 +32,6 @@
 #define HAPCURE_VERSION   "0.1"
 #define HICTOOLS_VERSION  "0.1"
 #define SEQTOOLS_VERSION  "0.1"
+#define ALNSPLIT_VERSION  "0.1"
 
 #endif // VERSION_H_

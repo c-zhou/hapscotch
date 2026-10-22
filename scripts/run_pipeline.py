@@ -4,7 +4,7 @@ run_pipeline.py - end-to-end driver for the HapScotch haplotyping pipeline.
 
 Stages (each is independently resumable - see Checkpointing below):
   1. seq_index       seqtools idx                   -> genome sequence index (.idx)
-  2. self_align      selfaln.py                     -> self-alignment PAF
+  2. self_align      selfaln.py                     -> self-alignment (.1aln)
   3. hic_align       hicaln.py                      -> per-HICFILE alignment (BAM/...)
   4. hic_convert     hictools convert               -> merged HiC BIN
   5. contig_ec       hapcure                        -> contig error-correction AGP
@@ -69,6 +69,16 @@ def _add_repo_root_to_path() -> None:
         os.environ["PATH"] = os.pathsep.join([root] + path_dirs)
 
 
+def _resolve_fastga_tool(tool: str, fastga_bin: str) -> str:
+    """Resolve a FastGA companion tool (ALNchain, ALNplot): a bare name is looked up
+    next to the FastGA executable first, then on PATH."""
+    if os.sep not in tool:
+        sibling = Path(fastga_bin).parent / tool
+        if Path(fastga_bin).parent != Path(".") and os.access(sibling, os.X_OK):
+            return str(sibling.resolve())
+    return _resolve_exe(tool)
+
+
 def _resolve_exe(tool: str) -> str:
     """Resolve tool name or path to its real absolute path if it exists, else keep unchanged."""
     found = shutil.which(tool)
@@ -102,6 +112,9 @@ class Ctx:
     hic_aligner: str = "bwamem2"
     seq_aligner: str = "FastGA"
     samtools_bin: str = "samtools"
+    alnsplit_bin: str = "alnsplit"
+    alnchain_bin: str = "ALNchain"
+    alnplot_bin: str = "ALNplot"
 
     @property
     def datadir(self) -> Path:
@@ -221,13 +234,23 @@ def _check_binary(name: str, target: str) -> Optional[str]:
     return None
 
 
+# ALNplot needs one of these to convert its EPS output to PDF
+PDF_TOOLS = ("pstopdf", "epstopdf", "ps2pdf", "eps2pdf")
+
+
+def _check_pdf_tool(name: str, target) -> Optional[str]:
+    if not any(shutil.which(t) for t in PDF_TOOLS):
+        return f"{name}: none of {'/'.join(PDF_TOOLS)} found on PATH (needed by ALNplot)"
+    return None
+
+
 def _check_script(name: str, target: Path) -> Optional[str]:
     if not target.is_file():
         return f"{name}: expected script not found: {target}"
     return None
 
 
-def preflight_check(ctx: Ctx, steps: list) -> None:
+def preflight_check(ctx: Ctx, steps: list, aln_plot: bool = False) -> None:
     """Verify every external tool/script needed by applicable steps can be found."""
     aligner_bin = ctx.bwamem2_bin if ctx.hic_aligner == "bwamem2" else ctx.minibwa_bin
 
@@ -244,6 +267,10 @@ def preflight_check(ctx: Ctx, steps: list) -> None:
                             ("hictools", ctx.hictools), ("hicmap.py", HICMAP_PY)],
         "collect_results": [("seqtools", ctx.seqtools)],
     }
+    if aln_plot:
+        checks_by_step["collect_results"] += [
+            ("alnsplit", ctx.alnsplit_bin), ("ALNchain", ctx.alnchain_bin),
+            ("ALNplot", ctx.alnplot_bin), ("[e]ps[to|2]pdf", PDF_TOOLS)]
 
     errors = []
     seen = set()
@@ -255,8 +282,12 @@ def preflight_check(ctx: Ctx, steps: list) -> None:
             if key in seen:
                 continue
             seen.add(key)
-            err = _check_script(name, target) if isinstance(target, Path) \
-                else _check_binary(name, target)
+            if isinstance(target, Path):
+                err = _check_script(name, target)
+            elif isinstance(target, tuple):
+                err = _check_pdf_tool(name, target)
+            else:
+                err = _check_binary(name, target)
             if err:
                 errors.append(f"[{step.name}] {err}")
 
@@ -308,7 +339,7 @@ def step_seq_index(ctx: Ctx) -> Step:
 
 
 def step_self_align(ctx: Ctx, args) -> tuple:
-    out = ctx.datadir / "seqaln.paf"
+    out = ctx.datadir / "seqaln.1aln"
 
     def _resolved_path() -> Path:
         return Path(args.seq_aln) if args.seq_aln else out
@@ -404,7 +435,7 @@ def step_contig_ec(ctx: Ctx, args, resolved_hicbin_fn, will_have_hic_fn, seqaln_
     def _run():
         ctx.hapcure_dir.mkdir(parents=True, exist_ok=True)
         run_cmd(
-            [ctx.hapcure_bin] + _parse_opts(args.hapcure_opt) +
+            [ctx.hapcure_bin, "--hic-tmpdir", str(ctx.hapcure_dir)] + _parse_opts(args.hapcure_opt) +
             ["-a", str(seqaln_fn())] +
             ["-t", str(ctx.threads)] +
             ["-o", str(ctx.hapcure_dir / "ctg")] +
@@ -429,7 +460,7 @@ def step_hapscotch(ctx: Ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec
 
     def _run():
         ctx.hapscotch_dir.mkdir(parents=True, exist_ok=True)
-        opts = []
+        opts = ["--hic-tmpdir", str(ctx.hapscotch_dir)]
         opts += _parse_opts(args.hapscotch_opt)
         if args.ploidy is not None:
             opts += ["-p", str(args.ploidy)]
@@ -509,7 +540,78 @@ def _find_yahs_scaffolds_agp(prefix: Path) -> Path:
     )
 
 
-def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn) -> Step:
+def _write_seq_order(scf_agp: Path, out: Path) -> int:
+    """ALNplot sequence order from the W lines of a scaffold AGP: '@<name>_<beg>_<end><ori>',
+    matching the piece names written by 'alnsplit -r'."""
+    n = 0
+    with open(scf_agp) as f, open(out, "w") as fo:
+        for line in f:
+            if not line.strip() or line.startswith("#"):
+                continue
+            c = line.rstrip("\n").split("\t")
+            if len(c) < 9 or c[4] != "W":
+                continue
+            ori = "-" if c[8] == "-" else "+"
+            fo.write(f"@{c[5]}_{c[6]}_{c[7]}{ori}\n")
+            n += 1
+    return n
+
+
+def _write_identity_agp(idxfile: Path, out: Path) -> None:
+    """A break AGP with each sequence as one whole piece, for when there is no
+    error-correction AGP (alnsplit then only renames sequences to name_1_len)."""
+    with open(idxfile) as f, open(out, "w") as fo:
+        for line in f:
+            c = line.split()
+            if len(c) < 2:
+                continue
+            fo.write(f"{c[0]}\t1\t{c[1]}\t1\tW\t{c[0]}\t1\t{c[1]}\t+\n")
+
+
+def make_aln_plot(ctx: Ctx, args, seqaln: Path, agpec: Optional[Path], scf_agp: Path, pdf: Path) -> None:
+    """Plot the self-alignment against the final scaffolds:
+    1. alnsplit -r   map the alignments onto the error-corrected pieces, named name_beg_end
+    2. ALNchain      keep the best chains, otherwise there are too many alignments to plot
+    3. ALNplot       plot in scaffold order, given by the W lines of the scaffold AGP
+    the sequence order and the split alignment file are removed afterwards"""
+    seq_order = ctx.datadir / "seq.order"
+    split_aln = ctx.datadir / "seqaln_ec.1aln"
+    chain_aln = ctx.datadir / "seqaln_ec.chain.1aln"
+    id_agp = ctx.datadir / "seq.id.agp"
+
+    if _write_seq_order(scf_agp, seq_order) == 0:
+        raise PipelineError(f"no sequence components found in scaffold AGP: {scf_agp}")
+    if agpec is None:
+        _write_identity_agp(ctx.idxfile, id_agp)
+    try:
+        run_cmd(
+            [ctx.alnsplit_bin, "-r", "-o", str(split_aln),
+             str(ctx.idxfile), str(agpec if agpec is not None else id_agp), str(seqaln)],
+            ctx.logdir / "res.alnsplit.log",
+        )
+        # FastGA tools take option values attached, e.g. -o<file>
+        run_cmd(
+            [ctx.alnchain_bin, f"-o{chain_aln}", str(split_aln)],
+            ctx.logdir / "res.alnchain.log",
+        )
+        # ALNplot writes <pdf>.eps then converts it with [e]ps[to|2]pdf, and ps2pdf puts
+        # the PDF in the working directory - so run it from the PDF's own directory
+        run_cmd(
+            [ctx.alnplot_bin, "-L", "-G", "-n0", f"-T{ctx.threads}", f"-p:{pdf.name}",
+             str(chain_aln.resolve()), str(seq_order.resolve()), str(seq_order.resolve())],
+            ctx.logdir / "res.alnplot.log", cwd=pdf.parent,
+        )
+        pdf.with_suffix(".eps").unlink(missing_ok=True)
+    finally:
+        for f in (seq_order, split_aln, id_agp):
+            f.unlink(missing_ok=True)
+
+
+def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn,
+                          seqaln_fn) -> Step:
+    def _aln_plot() -> bool:
+        return args.aln_plot and run_yahs_fn()
+
     def _outputs():
         outs = [ctx.results_dir / "haps.cnt.txt",
                 ctx.results_dir / "haps.grp.agp", 
@@ -522,6 +624,8 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
                 ctx.results_dir / "haps-all.scf.hic.png",
                 ctx.results_dir / "haps-all.scf.hic.pdf",
             ]
+        if _aln_plot():
+            outs += [ctx.results_dir / "haps-all.scf.aln.pdf"]
         return outs
 
     def _run():
@@ -591,7 +695,8 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
 
             hic_txt = ctx.results_dir / "haps-all.scf.hic.txt"
             run_cmd(
-                [ctx.hictools, "prepare", "-a", str(scfall_agp), "-n", "3000", "-o", str(hic_txt)] + 
+                [ctx.hictools, "prepare", "--hic-tmpdir", str(ctx.results_dir), 
+                 "-a", str(scfall_agp), "-n", "3000", "-o", str(hic_txt)] + 
                 [str(resolved_hicbin_fn()), str(ctx.idxfile)],
                 ctx.logdir / "res.hictools_prepare.log",
             )
@@ -604,6 +709,10 @@ def step_collect_results(ctx: Ctx, args, resolved_agpec_fn, resolved_hicbin_fn, 
                  str(hic_txt)],
                 ctx.logdir / "res.hicmap.log",
             )
+
+            if _aln_plot():
+                make_aln_plot(ctx, args, Path(seqaln_fn()), agpec, scfall_agp,
+                              ctx.results_dir / "haps-all.scf.aln.pdf")
 
     return Step("collect_results", _outputs, _run)
 
@@ -627,8 +736,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("-v", "--verbose", type=int, default=0, help="verbose level [0]")
 
     aln = p.add_argument_group("alignment inputs")
-    aln.add_argument("--seq-aln", metavar="PAF",
-                      help="existing self-alignment PAF; skips self_align step")
+    aln.add_argument("--seq-aln", metavar="FILE",
+                      help="existing self-alignment (.1aln recommended, or PAF[.gz]); skips self_align step")
     aln.add_argument("--hic-aln", action="append", metavar="FILE", default=[],
                       help="pre-aligned HiC file (BED/PA5/BAM/BIN); repeatable")
     aln.add_argument("--hic-file", action="append", metavar="FILE", default=[],
@@ -656,6 +765,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     yh.add_argument("--yahs-opt", action="append", default=[],
                      help="options passed through to yahs; repeatable ('yahs -h' for all options)")
 
+    rs = p.add_argument_group("result options")
+    rs.add_argument("--no-aln-plot", dest="aln_plot", action="store_false", default=True,
+                     help="skip the sequence alignment plot of the scaffolds (needs alnsplit, "
+                          "and ALNchain/ALNplot from FastGA)")
+
     ctl = p.add_argument_group("pipeline control")
     ctl.add_argument("--resume", action="store_true",
                       help="resume a previous run in OUTDIR: skips already-completed steps")
@@ -677,6 +791,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     bins.add_argument("--bwamem2-bin", default="bwa-mem2")
     bins.add_argument("--minibwa-bin", default="minibwa")
     bins.add_argument("--samtools-bin", default="samtools")
+    bins.add_argument("--alnsplit-bin", default="alnsplit")
+    bins.add_argument("--alnchain-bin", default="ALNchain")
+    bins.add_argument("--alnplot-bin", default="ALNplot")
 
     return p
 
@@ -690,6 +807,9 @@ _NON_CRITICAL_PARAM_KEYS = {
     "resume", "force", "force_from", "verbose", "outdir",
     "seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin", "yahs_bin", "fastga_bin",
     "bwamem2_bin", "minibwa_bin", "samtools_bin",
+    "alnsplit_bin", "alnchain_bin", "alnplot_bin",
+    # result-only option, added later; not recorded by older runs
+    "aln_plot",
 }
 
 
@@ -710,8 +830,12 @@ def main(argv=None) -> int:
     args = build_arg_parser().parse_args(argv)
 
     for k in ("seqtools_bin", "hictools_bin", "hapscotch_bin", "hapcure_bin",
-              "yahs_bin", "fastga_bin", "bwamem2_bin", "minibwa_bin", "samtools_bin"):
+              "yahs_bin", "fastga_bin", "bwamem2_bin", "minibwa_bin", "samtools_bin",
+              "alnsplit_bin"):
         setattr(args, k, _resolve_exe(getattr(args, k)))
+    # FastGA companion tools usually live next to the FastGA executable
+    for k in ("alnchain_bin", "alnplot_bin"):
+        setattr(args, k, _resolve_fastga_tool(getattr(args, k), args.fastga_bin))
 
     outdir = Path(args.outdir) if args.outdir else Path(
         f"HapScotch_OUT_{datetime.now():%Y%m%d}"
@@ -746,7 +870,8 @@ def main(argv=None) -> int:
         hapscotch_bin=args.hapscotch_bin, hapcure_bin=args.hapcure_bin,
         yahs_bin=args.yahs_bin, fastga_bin=args.fastga_bin,
         bwamem2_bin=args.bwamem2_bin, minibwa_bin=args.minibwa_bin,
-        seq_aligner=args.seq_aligner, hic_aligner=args.hic_aligner, samtools_bin=args.samtools_bin
+        seq_aligner=args.seq_aligner, hic_aligner=args.hic_aligner, samtools_bin=args.samtools_bin,
+        alnsplit_bin=args.alnsplit_bin, alnchain_bin=args.alnchain_bin, alnplot_bin=args.alnplot_bin,
     )
     ctx.ensure_dirs()
 
@@ -788,13 +913,14 @@ def main(argv=None) -> int:
 
     step_hs = step_hapscotch(ctx, args, seqaln_fn, resolved_hicbin_fn, resolved_agpec_fn, run_yahs_fn)
     step_yh = step_yahs_scaffold(ctx, args, resolved_hicbin_fn, run_yahs_fn)
-    step_res = step_collect_results(ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn)
+    step_res = step_collect_results(ctx, args, resolved_agpec_fn, resolved_hicbin_fn, run_yahs_fn,
+                                     seqaln_fn)
 
     steps = [step_idx, step_sa, step_ha, step_hc, step_ec, step_hs, step_yh, step_res]
 
     force_from_seen = False
     try:
-        preflight_check(ctx, steps)
+        preflight_check(ctx, steps, aln_plot=args.aln_plot and run_yahs_fn())
         for step in steps:
             if args.force_from and step.name == args.force_from:
                 force_from_seen = True

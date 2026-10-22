@@ -269,6 +269,8 @@ static ko_longopt_t prepare_long_options[] = {
     { "n-bins",     ko_required_argument, 'n' },
     { "bin-size",   ko_required_argument, 's' },
     { "min-quality",ko_required_argument, 'q' },
+    { "hic-tmpdir", ko_required_argument, 'T' },
+    { "hic-memory", ko_required_argument, 'm' },
     { "version",    ko_no_argument,       'V' },
     { "help",       ko_no_argument,       'h' },
     { 0, 0, 0 }

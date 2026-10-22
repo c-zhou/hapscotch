@@ -30,7 +30,6 @@
 
 #include "ec.h"
 #include "hic.h"
-#include "paf.h"
 #include "misc.h"
 #include "alnio.h"
 #include "sdict.h"
@@ -60,32 +59,6 @@ static int parse_file_type(const char *str, fileType_t *f_type)
     return 0;
 }
 
-static void print_help(FILE *fo)
-{
-    fprintf(fo, "\n");
-    fprintf(fo, "Usage: hapcure [options] <genome.fa.[fai|idx]> <hic.[bed|bam|pa5|1map|bin]>\n");
-    fprintf(fo, "Options:\n");
-    fprintf(fo, "    -s NUM                 bin size for counting hic links [1k]\n");
-    fprintf(fo, "    -f NUM                 minimum retained fragment size [10k]\n");
-    fprintf(fo, "    -d FLOAT               minimum median drop to call a break [.3]\n");
-    fprintf(fo, "    -r FLOAT               minimum recovery rate for a breakpoint [0.8]\n");
-    fprintf(fo, "    -p FLOAT               p-value threshold for calling errors [0.01]\n");
-    fprintf(fo, "    -a FILE                self-alignment file for palindrome error detection\n");
-    fprintf(fo, "      --pal-size NUM       minimum palindrome size to detect [100k]\n");
-    fprintf(fo, "      --pal-dens FLOAT     minimum alignment density to call a palindrome [0.8]\n");
-    fprintf(fo, "      --file-type   STR    input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
-    fprintf(fo, "      --read-length INT    read length (required for PA5 format input) [150]\n");
-    fprintf(fo, "      --report-only        do not write an AGP file\n");
-    fprintf(fo, "    -o STR                 output prefix [hapcure.out]\n");
-    fprintf(fo, "    -v INT                 verbose level [0]\n");
-    fprintf(fo, "    -h, --help             print this help\n");
-    fprintf(fo, "    -V, --version          show version number\n");
-    fprintf(fo, "\n");
-    fprintf(fo, "Example: hapcure -o hapcure.out genome.fa.fai hic.bam\n");
-    fprintf(fo, "         hapcure -a self_alignments.paf -o hapcure.out genome.fa.fai hic.bam\n");
-    fprintf(fo, "\n");
-}
-
 static ko_longopt_t long_options[] = {
     { "bin-size",     ko_required_argument, 's' },
     { "min-frag",     ko_required_argument, 'f' },
@@ -97,6 +70,8 @@ static ko_longopt_t long_options[] = {
     { "report-only",  ko_no_argument,       303 },
     { "pal-size",     ko_required_argument, 304 },
     { "pal-dens",     ko_required_argument, 305 },
+    { "hic-tmpdir",   ko_required_argument, 306 },
+    { "hic-memory",   ko_required_argument, 307 },
     { "version",      ko_no_argument,       'V' },
     { "help",         ko_no_argument,       'h' },
     { 0, 0, 0 }
@@ -111,10 +86,10 @@ int main(int argc, char *argv[])
     aln_t *alns;
     hic_store_t hstore;
     fileType_t f_type;
-    FILE *fo;
+    FILE *fo, *fp_help;
     ec_pos_t *calls;
-    char *hic_file, *paf_file, *hic_bfile, *report_file, *agp_file;
-    int c, ncall, npali, read_len, report_only, n_threads, ret;
+    char *hic_file, *aln_file, *hic_bfile, *report_file, *agp_file;
+    int c, ncall, npali, read_len, report_only, n_threads, long_help, ret;
     uint64 *palis;
     int64 nhic, naln;
     char *pref_out;
@@ -122,12 +97,14 @@ int main(int argc, char *argv[])
     sys_init();
     realtime0 = realtime();
 
+    fp_help = stderr;
     f_type = NOSET;
     pref_out = "hapcure.out";
     hic_file = NULL;
-    paf_file = NULL;
+    aln_file = NULL;
     read_len = 150;
     report_only = 0;
+    long_help = 0;
     n_threads = 1;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >= 0) {
@@ -138,7 +115,7 @@ int main(int argc, char *argv[])
         else if (c == 'r') ec_conf.rec_rate = atof(opt.arg);
         else if (c == 'p') ec_conf.p_thresh = atof(opt.arg);
         else if (c == 't') n_threads = atoi(opt.arg);
-        else if (c == 'a') paf_file = opt.arg;
+        else if (c == 'a') aln_file = opt.arg;
         else if (c == 301) {
             if (parse_file_type(opt.arg, &f_type)) {
                 fprintf(stderr, "[E::%s] unknown file type: %s\n", __func__, opt.arg);
@@ -149,29 +126,59 @@ int main(int argc, char *argv[])
         else if (c == 303) report_only = 1;
         else if (c == 304) ec_conf.pal_size = parse_num(opt.arg);
         else if (c == 305) ec_conf.pal_dens = atof(opt.arg);
+        else if (c == 306) HIC_TMP_DIR = opt.arg;
+        else if (c == 307) HIC_MEM_LIMIT = parse_num(opt.arg);
         else if (c == 'v') VERBOSE = atoi(opt.arg);
-        else if (c == 'h') {
-            print_help(stdout);
-            return 0;
-        } else if (c == 'V') {
+        else if (c == 'h') fp_help = stdout; 
+        else if (c == 'V') {
             puts(HAPCURE_VERSION);
             return 0;
         } else if (c == '?') {
-            fprintf(stderr, "[E::%s] unknown option: %s\n", __func__, argv[opt.i - 1]);
-            return 1;
-        } else if (c == ':') {
+            if (argv[opt.i - 1][1] == '?') {
+                fp_help = stdout;
+                long_help = 1;
+            } else {
+                fprintf(stderr, "[E::%s] unknown option: \"%s\"\n", __func__, argv[opt.i - 1]);
+                return 1;
+            }
+        }
+        else if (c == ':') {
             fprintf(stderr, "[E::%s] missing option argument: %s\n", __func__, argv[opt.i - 1]);
             return 1;
         }
     }
 
-    if (argc - opt.ind < 1) {
-        print_help(stderr);
-        return 1;
+    if (argc - opt.ind < 1 || fp_help == stdout) {
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Usage: hapcure [options] <genome.fa.[fai|idx]> <hic.[bed|bam|pa5|1map|bin]>\n");
+        fprintf(fp_help, "Options:\n");
+        fprintf(fp_help, "    -s NUM                 bin size for counting hic links [1k]\n");
+        fprintf(fp_help, "    -f NUM                 minimum retained fragment size [10k]\n");
+        fprintf(fp_help, "    -d FLOAT               minimum median drop to call a break [.3]\n");
+        fprintf(fp_help, "    -r FLOAT               minimum recovery rate for a breakpoint [0.8]\n");
+        fprintf(fp_help, "    -p FLOAT               p-value threshold for calling errors [0.01]\n");
+        fprintf(fp_help, "    -a FILE                self-alignment file for palindrome error detection\n");
+        if (long_help) {
+            fprintf(fp_help, "      --pal-size NUM       minimum palindrome size to detect [100k]\n");
+            fprintf(fp_help, "      --pal-dens FLOAT     minimum alignment density to call a palindrome [0.8]\n");
+            fprintf(fp_help, "      --file-type   STR    input file type BED|BAM|PA5|ONE|BIN, file name extension is ignored\n");
+            fprintf(fp_help, "      --read-length INT    read length (required for PA5 format input) [150]\n");
+            fprintf(fp_help, "      --report-only        do not write an AGP file\n");
+            fprintf(fp_help, "      --hic-tmpdir  STR    temporary directory for HiC processing [%s]\n", HIC_TMP_DIR);
+            fprintf(fp_help, "      --hic-memory  NUM    memory limit for HiC processing [%lldG]\n", HIC_MEM_LIMIT / (1 << 30));
+        }
+        fprintf(fp_help, "    -o STR                 output prefix [hapcure.out]\n");
+        fprintf(fp_help, "    -v INT                 verbose level [0]\n");
+        fprintf(fp_help, "    -h, --help             print this help\n");
+        fprintf(fp_help, "    -V, --version          show version number\n");
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Example: hapcure -o hapcure.out genome.fa.fai hic.bam\n");
+        fprintf(fp_help, "         hapcure -a self_alignments.paf -o hapcure.out genome.fa.fai hic.bam\n");
+        fprintf(fp_help, "\n");
+        return fp_help == stdout? 0 : 1;
     }
-    if (argc - opt.ind < 2 && paf_file == NULL) {
+    if (argc - opt.ind < 2 && aln_file == NULL) {
         fprintf(stderr, "[E::%s] missing HiC binary file or self-alignment file\n", __func__);
-        print_help(stderr);
         return 1;
     }
     if (argc - opt.ind < 2)
@@ -213,7 +220,7 @@ int main(int argc, char *argv[])
     
     // call error correction positions from palindromes
     naln = 0;
-    alns = read_pafs(&paf_file, paf_file?1:0, dicts, NULL, 0, 1, &naln);
+    alns = read_alns(&aln_file, aln_file?1:0, dicts, NULL, 0, 1, &naln);
     npali = 0;
     palis = aln_find_palindromes(alns, naln, dicts, ec_conf.pal_size, ec_conf.pal_dens, n_threads, &npali);
     free(alns); // no fragments to free

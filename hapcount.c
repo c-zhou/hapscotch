@@ -34,7 +34,6 @@
 
 #include "ketopt.h"
 
-#include "paf.h"
 #include "sdict.h"
 #include "busco.h"
 #include "overlap.h"
@@ -113,7 +112,7 @@ strerror(errno));
 
     if (argc == opt.ind || fp_help == stdout) {
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Usage: hapcount [options] <genome.fa.[fai|idx]> <aln.paf[.gz]>\n");
+        fprintf(fp_help, "Usage: hapcount [options] <genome.fa.[fai|idx]> <aln.[1aln|paf[.gz]]>\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -g FILE                BUSCO gene full table (for statistics only)\n");
         fprintf(fp_help, "    -a FILE                AGP file of assembly error corrected sequences\n");
@@ -125,7 +124,7 @@ strerror(errno));
         fprintf(fp_help, "    -h, --help             print this help\n");
         fprintf(fp_help, "    -V, --version          show version number\n");
         fprintf(fp_help, "\n");
-        fprintf(fp_help, "Example: hapcount -o hapcount.out genome.fa.fai aln.paf\n");
+        fprintf(fp_help, "Example: hapcount -o hapcount.out genome.fa.fai aln.1aln\n");
         fprintf(fp_help, "\n");
         return fp_help == stdout? 0 : 1;
     }
@@ -165,7 +164,7 @@ strerror(errno));
 
     // read PAF files
     naln = 0;
-    alns = read_pafs(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, 0, &naln);
+    alns = read_alns(argv + opt.ind + 1, argc - opt.ind - 1, dicts, break_dict, dual_aln, 0, &naln);
     
     // sort by aread, abpos, aepos
     qsort(alns, naln, sizeof(aln_t), aln_coords_cmpfunc);

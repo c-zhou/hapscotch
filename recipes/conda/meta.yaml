@@ -24,10 +24,11 @@ requirements:
     - numpy
     - matplotlib-base
     - samtools
-    - fastga
+    - fastga >=1.5.20260729   # FastGA v1.5.1, needed for ALNplot -G
     - bwa-mem2
     - minibwa
     - yahs
+    - ghostscript             # ps2pdf, used by ALNplot for PDF output
 
 test:
   commands:
@@ -36,8 +37,9 @@ test:
     - hictools --help 2>&1 | grep -qi usage
     - seqtools --help 2>&1 | grep -qi usage
     - hapcount --help 2>&1 | grep -qi usage
+    - alnsplit --help 2>&1 | grep -qi usage
     - which run_pipeline.py selfaln.py hicaln.py hicmap.py
-    - which FastGA bwa-mem2 minibwa samtools yahs
+    - which FastGA ALNchain ALNplot bwa-mem2 minibwa samtools yahs ps2pdf
 
 about:
   home: https://github.com/c-zhou/hapscotch
@@ -49,9 +51,9 @@ about:
     genome assemblies from all-vs-all sequence self-alignments, optionally
     refined with Hi-C data (contig error-correction and Hi-C-guided
     rescaffolding via YaHS). This package builds hapscotch, hapcure,
-    hictools, seqtools and hapcount, plus the scripts/run_pipeline.py
-    driver, and pulls in FastGA, bwa-mem2, minibwa, samtools and YaHS as 
-    runtime dependencies so the whole pipeline works out of the box.
+    hictools, seqtools, hapcount and alnsplit, plus the scripts/run_pipeline.py
+    driver, and pulls in FastGA, bwa-mem2, minibwa, samtools, YaHS and
+    ghostscript as runtime dependencies so the whole pipeline works out of the box.
 
 extra:
   recipe-maintainers:

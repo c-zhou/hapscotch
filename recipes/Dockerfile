@@ -24,6 +24,8 @@ RUN git clone --recurse-submodules https://github.com/c-zhou/hapscotch.git /opt/
     && cp scripts/run_pipeline.py scripts/selfaln.py scripts/hicaln.py scripts/hicmap.py \
         /opt/conda/envs/hapscotch/bin/ \
     && chmod +x /opt/conda/envs/hapscotch/bin/*.py \
+    && cp scripts/run_pipeline.py /opt/conda/envs/hapscotch/bin/run_pipeline \
+    && chmod +x /opt/conda/envs/hapscotch/bin/run_pipeline \
     && rm -rf /opt/hapscotch
 
 WORKDIR /data

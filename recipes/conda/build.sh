@@ -12,3 +12,5 @@ cp hapscotch hapcure hictools seqtools hapcount alnsplit "${PREFIX}/bin/"
 cp -a lib/. "${PREFIX}/bin/lib/"
 cp scripts/run_pipeline.py scripts/selfaln.py scripts/hicaln.py scripts/hicmap.py "${PREFIX}/bin/"
 chmod +x "${PREFIX}"/bin/*.py
+cp scripts/run_pipeline.py "${PREFIX}/bin/run_pipeline"
+chmod +x "${PREFIX}/bin/run_pipeline"

@@ -79,7 +79,7 @@ python3 scripts/run_pipeline.py --help
 **Docker** — [`recipes/Dockerfile`](recipes/Dockerfile) builds an image with the full pipeline (all six binaries, `scripts/*.py`, and FastGA/bwa-mem2/minibwa/samtools/YaHS):
 
 ```bash
-docker build -t hapscotch -f recipes/Dockerfile .
+docker build --no-cache -t hapscotch -f recipes/Dockerfile .
 docker run --rm -v "$PWD":/data -w /data hapscotch run_pipeline.py --help
 ```
 
@@ -375,7 +375,7 @@ hapcount -o out genome.fa.idx genome.1aln
 
 ## Reference
 
-Chenxi Zhou. (2026). c-zhou/hapscotch: Hapscotch-0.1 (Version 0.1) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23546384
+Chenxi Zhou. (2026). c-zhou/hapscotch: Hapscotch-0.2 (Version 0.2) [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.23573025
 
 *Below are references for the tools used in the pipeline. Please also consider including them if any particular modules are used.*
 

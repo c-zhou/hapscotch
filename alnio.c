@@ -186,6 +186,26 @@ static void remap_split_aln(asm_dict_t *bd, uint32 qid, uint32 tid, paf_rec_t *r
     kv_destroy(cuts);
 }
 
+// alignment interval [beg, end) is valid on a sequence of length len
+// protects against out-of-range alignments occasionally produced by aligners
+static inline int aln_range_valid(int64 beg, int64 end, int64 len)
+{
+    return beg >= 0 && beg < end && end <= len;
+}
+
+// a PAF record has valid query and target intervals
+// NB: negative coordinates wrap around to large values in the unsigned fields, failing end <= len
+static inline int paf_rec_valid(paf_rec_t *rec)
+{
+    return aln_range_valid(rec->qs, rec->qe, rec->ql) && aln_range_valid(rec->ts, rec->te, rec->tl);
+}
+
+static inline void report_invalid_alns(const char *func, int64 n_bad, const char *fmt)
+{
+    if (n_bad > 0)
+        fprintf(stderr, "[W::%s] %lld %s records with out-of-range coordinates were dropped\n", func, n_bad, fmt);
+}
+
 // filter an alignment record and add it to alns, remapping onto break-AGP pieces if break_dict is given
 // qid and tid are the (raw) sequence ids of the query and target
 static void add_aln_rec(asm_dict_t *break_dict, uint32 qid, uint32 tid, paf_rec_t *rec, int dual_aln, int self_aln, aln_vec_t *alns)
@@ -213,6 +233,7 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
     sdict_t *vd;
     uint32 qid, tid;
     uint64 n_rec;
+    int64 n_bad;
     aln_vec_t alns;
     int i;
 
@@ -226,6 +247,7 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
     kv_resize(aln_t, alns, 1<<24);
     rec = &_rec;
     n_rec = 0;
+    n_bad = 0;
     for (i = 0; i < fn; i++) {
         paf = paf_open(fs[i]);
         if (!paf) {
@@ -235,6 +257,11 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
         while (paf_read(paf, rec) >= 0) {
             if (++n_rec % 1000000 == 0)
                 fprintf(stderr, "[M::%s] read %lld paf records\n", __func__, n_rec);
+            // drop out-of-range alignments
+            if (!paf_rec_valid(rec)) {
+                ++n_bad;
+                continue;
+            }
             // skip those not in sequence dicts
             if (!sd_exists(vd, rec->qn, rec->ql, &qid) ||
                 !sd_exists(vd, rec->tn, rec->tl, &tid))
@@ -244,6 +271,7 @@ aln_t *read_pafs(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
         paf_close(paf);
     }
     fprintf(stderr, "[M::%s] read %lld paf records, %ld retained\n", __func__, n_rec, alns.n);
+    report_invalid_alns(__func__, n_bad, "paf");
 
     MYREALLOC(alns.a, alns.n);
 
@@ -363,7 +391,8 @@ static int read_gdb_skeletons(OneFile *of, sdict_t *vd, gdb_skel_t *skel, int *t
 // read the current alignment record of a .1aln file into rec in scaffold (PAF) coordinates
 // the match and block lengths are estimated from the number of differences as in FastGA ALNtoPAF
 // on return, the file is positioned at the next alignment; *more is set to 0 at the end of the file
-// return 1 if both sequences are in the sequence dict, 0 otherwise
+// return 1 if both sequences are in the sequence dict, 0 otherwise,
+// and -1 if the alignment is out of the range of its contigs
 static int read_1aln_rec(OneFile *of, gdb_skel_t *ask, gdb_skel_t *bsk, paf_rec_t *rec, uint32 *qid, uint32 *tid, int *_diffs, int *more)
 {
     gdb_ctg_t *actg, *bctg;
@@ -399,6 +428,10 @@ static int read_1aln_rec(OneFile *of, gdb_skel_t *ask, gdb_skel_t *bsk, paf_rec_
     }
     actg = &ask->a[aread];
     bctg = &bsk->a[bread];
+    // out-of-range alignments, checked on the contigs so that they cannot
+    // spill into a gap or the next contig in scaffold coordinates
+    if (!aln_range_valid(abpos, aepos, actg->clen) || !aln_range_valid(bbpos, bepos, bctg->clen))
+        return -1;
     *qid = actg->sid;
     *tid = bctg->sid;
     if (actg->sid == UINT32_MAX || bctg->sid == UINT32_MAX)
@@ -458,9 +491,10 @@ aln_t *read_1aln(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
     paf_rec_t _rec, *rec;
     sdict_t *vd;
     uint64 n_rec;
+    int64 n_bad;
     aln_vec_t alns;
     uint32 qid, tid;
-    int i, nsk, more;
+    int i, nsk, more, ret;
 
     if (_naln) *_naln = 0;
     if (!fn) return NULL;
@@ -473,14 +507,21 @@ aln_t *read_1aln(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
     rec = &_rec;
     MYBZERO(rec, 1);
     n_rec = 0;
+    n_bad = 0;
     for (i = 0; i < fn; i++) {
         of = open_1aln(fs[i], vd, skel, &ask, &bsk, &nsk, NULL);
         more = (of->lineType == 'A');
         while (more) {
             if (++n_rec % 1000000 == 0)
                 fprintf(stderr, "[M::%s] read %lld 1aln records\n", __func__, n_rec);
+            ret = read_1aln_rec(of, ask, bsk, rec, &qid, &tid, NULL, &more);
+            // drop out-of-range alignments
+            if (ret < 0) {
+                ++n_bad;
+                continue;
+            }
             // skip those not in sequence dicts
-            if (!read_1aln_rec(of, ask, bsk, rec, &qid, &tid, NULL, &more))
+            if (!ret)
                 continue;
             add_aln_rec(break_dict, qid, tid, rec, dual_aln, self_aln, &alns);
         }
@@ -489,6 +530,7 @@ aln_t *read_1aln(char **fs, int fn, sdict_t *dicts, asm_dict_t *break_dict, int 
         oneFileClose(of);
     }
     fprintf(stderr, "[M::%s] read %lld 1aln records, %ld retained\n", __func__, n_rec, alns.n);
+    report_invalid_alns(__func__, n_bad, "1aln");
 
     MYREALLOC(alns.a, alns.n);
 
@@ -715,9 +757,9 @@ int64 split_aln(char *fin, asm_dict_t *break_dict, int raw_name, FILE *fo)
     sdict_t *vd;
     char *ref;
     uint64 n_rec;
-    int64 n_out, blk;
+    int64 n_out, n_bad, blk;
     uint32 qid, tid;
-    int k, nsk, more, diffs, tspace, is_aln;
+    int k, nsk, more, ret, diffs, tspace, is_aln;
 
     if (!break_dict) {
         fprintf(stderr, "[E::%s] a break AGP dictionary is required\n", __func__);
@@ -761,13 +803,20 @@ int64 split_aln(char *fin, asm_dict_t *break_dict, int raw_name, FILE *fo)
     MYBZERO(rec, 1);
     n_rec = 0;
     n_out = 0;
+    n_bad = 0;
     if (is_aln) {
         more = (of->lineType == 'A');
         while (more) {
             if (++n_rec % 1000000 == 0)
                 fprintf(stderr, "[M::%s] read %lld 1aln records\n", __func__, n_rec);
+            ret = read_1aln_rec(of, ask, bsk, rec, &qid, &tid, &diffs, &more);
+            // drop out-of-range alignments
+            if (ret < 0) {
+                ++n_bad;
+                continue;
+            }
             // skip those not in sequence dicts
-            if (!read_1aln_rec(of, ask, bsk, rec, &qid, &tid, &diffs, &more))
+            if (!ret)
                 continue;
             n_out += write_split_rec(ofo, break_dict, qid, tid, rec, diffs, &frags);
         }
@@ -775,6 +824,11 @@ int64 split_aln(char *fin, asm_dict_t *break_dict, int raw_name, FILE *fo)
         while (paf_read(paf, rec) >= 0) {
             if (++n_rec % 1000000 == 0)
                 fprintf(stderr, "[M::%s] read %lld paf records\n", __func__, n_rec);
+            // drop out-of-range alignments
+            if (!paf_rec_valid(rec)) {
+                ++n_bad;
+                continue;
+            }
             // skip those not in sequence dicts
             if (!sd_exists(vd, rec->qn, rec->ql, &qid) ||
                 !sd_exists(vd, rec->tn, rec->tl, &tid))
@@ -786,6 +840,7 @@ int64 split_aln(char *fin, asm_dict_t *break_dict, int raw_name, FILE *fo)
         }
     }
     fprintf(stderr, "[M::%s] read %lld %s records, %lld written\n", __func__, n_rec, is_aln? "1aln" : "paf", n_out);
+    report_invalid_alns(__func__, n_bad, is_aln? "1aln" : "paf");
 
     kv_destroy(frags);
     oneFileClose(ofo); // also closes the duplicate of fo
